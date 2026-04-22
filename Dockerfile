@@ -53,6 +53,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     libsqlite3-0 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --home-dir /home/microclaw --uid 10001 --shell /usr/sbin/nologin microclaw
