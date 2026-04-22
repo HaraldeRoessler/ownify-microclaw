@@ -655,6 +655,24 @@ pub(super) async fn api_config_self_check(
         }
     }
 
+    // klaw-fork: platform-managed deployments (Kubernetes, single-tenant pods
+    // behind an authenticated reverse proxy) legitimately cannot satisfy some
+    // of microclaw's single-host heuristics (loopback-only binding, host-level
+    // sandbox). The operator can list warning codes to omit from the response
+    // via MICROCLAW_SUPPRESS_WARNING_CODES=code1,code2,... — suppressed codes
+    // disappear from both the `warnings` array and the aggregate counters, so
+    // the Settings self-check reflects the real posture in this environment.
+    if let Ok(raw) = std::env::var("MICROCLAW_SUPPRESS_WARNING_CODES") {
+        let suppressed: std::collections::HashSet<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !suppressed.is_empty() {
+            warnings.retain(|w| !suppressed.contains(w.code));
+        }
+    }
+
     let risk_level = if warnings.iter().any(|w| w.severity == "high") {
         "high"
     } else if warnings.iter().any(|w| w.severity == "medium") {
