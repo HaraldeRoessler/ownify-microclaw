@@ -1,7 +1,7 @@
 ---
 name: find-skills
 description: "Find reusable skills from the vercel-labs/skills registry by task keywords, evaluate fit, and suggest how to install or adapt them for MicroClaw. Use when users ask 'do we have a skill for X?', 'find skills for a given task', or want to discover existing skills instead of writing from scratch. Triggers on mentions of find skill, search skills, skill registry, or reuse skill."
-license: Proprietary. LICENSE.txt has complete terms
+license: MIT (see repository LICENSE)
 compatibility: "Requires curl for GitHub API access. Works on macOS, Linux, and Windows."
 ---
 

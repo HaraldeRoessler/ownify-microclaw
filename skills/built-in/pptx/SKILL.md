@@ -1,232 +1,122 @@
 ---
 name: pptx
-description: "Use this skill any time a .pptx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations; reading, parsing, or extracting text from any .pptx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates, layouts, speaker notes, or comments. Trigger whenever the user mentions \"deck,\" \"slides,\" \"presentation,\" or references a .pptx filename, regardless of what they plan to do with the content afterward. If a .pptx file needs to be opened, created, or touched, use this skill."
-license: Proprietary. LICENSE.txt has complete terms
+description: "Create, read, or edit PowerPoint presentations (.pptx). Use whenever the user mentions a slide deck, presentation, pitch deck, or .pptx file — whether the goal is producing, modifying, or extracting content. Do NOT use for Word documents, spreadsheets, or PDF-first deliverables."
+license: MIT (see repository LICENSE)
 ---
 
-# PPTX Skill
+# pptx — PowerPoint decks
 
-## Quick Reference
+Tools in the runtime:
 
-| Task | Guide |
-|------|-------|
-| Read/analyze content | `python -m markitdown presentation.pptx` |
-| Edit or create from template | Read [editing.md](editing.md) |
-| Create from scratch | Read [pptxgenjs.md](pptxgenjs.md) |
+- `python-pptx` — pythonic read/write of .pptx, slide layouts, speaker notes
+- `soffice` (LibreOffice headless) — convert to/from other formats, render thumbnails
+- `pdftoppm` (poppler) — rasterise slides via PDF intermediate
 
----
+Use `python-pptx` for everything content-related. Reach for `soffice` only to go to/from .pptx and other formats, or to generate slide thumbnails.
 
-## Reading Content
+## Read / extract
+
+```python
+from pptx import Presentation
+
+prs = Presentation("in.pptx")
+for i, slide in enumerate(prs.slides, 1):
+    print(f"--- slide {i} ---")
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            for para in shape.text_frame.paragraphs:
+                print("".join(r.text for r in para.runs))
+    if slide.has_notes_slide:
+        print("NOTES:", slide.notes_slide.notes_text_frame.text)
+```
+
+## Create a deck
+
+```python
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+
+prs = Presentation()                     # default 13.33" x 7.5" (16:9)
+
+# title slide
+slide = prs.slides.add_slide(prs.slide_layouts[0])
+slide.shapes.title.text = "Quarterly review"
+slide.placeholders[1].text = "Harald Roessler · 2026-04-23"
+
+# content slide
+slide = prs.slides.add_slide(prs.slide_layouts[1])
+slide.shapes.title.text = "Headline numbers"
+tf = slide.placeholders[1].text_frame
+tf.text = "Revenue up 11%"
+for point in ["EMEA led growth (+8%)", "APAC accelerating (+14%)", "Churn stable"]:
+    p = tf.add_paragraph()
+    p.text = point
+    p.font.size = Pt(18)
+
+# picture slide
+slide = prs.slides.add_slide(prs.slide_layouts[6])   # blank
+slide.shapes.add_picture("chart.png", Inches(1), Inches(1.5), width=Inches(8))
+
+prs.save("out.pptx")
+```
+
+## Edit an existing deck
+
+```python
+from pptx import Presentation
+prs = Presentation("in.pptx")
+for slide in prs.slides:
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            for p in shape.text_frame.paragraphs:
+                for run in p.runs:
+                    run.text = run.text.replace("{{YEAR}}", "2026")
+prs.save("out.pptx")
+```
+
+Run-level replacement preserves font, weight, colour. Paragraph-level `text = ` assignment discards all inline formatting.
+
+## Speaker notes
+
+```python
+from pptx import Presentation
+prs = Presentation("in.pptx")
+for slide in prs.slides:
+    notes = slide.notes_slide.notes_text_frame
+    notes.text = "Land the revenue point before moving on."
+prs.save("out.pptx")
+```
+
+## Tables and charts
+
+Tables:
+
+```python
+from pptx.util import Inches
+slide = prs.slides.add_slide(prs.slide_layouts[5])
+rows, cols = 3, 3
+table = slide.shapes.add_table(rows, cols, Inches(1), Inches(2), Inches(8), Inches(2)).table
+for j, h in enumerate(["Region", "Revenue", "Growth"]):
+    table.cell(0, j).text = h
+for i, (r, v, g) in enumerate([("EMEA", "€1.2M", "+8%"), ("APAC", "€0.9M", "+14%")], start=1):
+    table.cell(i, 0).text, table.cell(i, 1).text, table.cell(i, 2).text = r, v, g
+```
+
+Charts are verbose through python-pptx; a pragmatic workflow for anything beyond a simple bar is to render the chart in matplotlib as a PNG and insert it with `add_picture`.
+
+## Convert / thumbnail
 
 ```bash
-# Text extraction
-python -m markitdown presentation.pptx
-
-# Visual overview
-python scripts/thumbnail.py presentation.pptx
-
-# Raw XML
-python scripts/office/unpack.py presentation.pptx unpacked/
+soffice --headless --convert-to pdf in.pptx          # → in.pdf
+pdftoppm -jpeg -r 120 in.pdf thumb                    # → thumb-1.jpg, thumb-2.jpg, …
 ```
 
----
+Round-trip through PDF then raster is more robust than trying to render slides directly — LibreOffice handles the deck layout, poppler handles the imaging.
 
-## Editing Workflow
+## Rules of thumb
 
-**Read [editing.md](editing.md) for full details.**
-
-1. Analyze template with `thumbnail.py`
-2. Unpack → manipulate slides → edit content → clean → pack
-
----
-
-## Creating from Scratch
-
-**Read [pptxgenjs.md](pptxgenjs.md) for full details.**
-
-Use when no template or reference presentation is available.
-
----
-
-## Design Ideas
-
-**Don't create boring slides.** Plain bullets on a white background won't impress anyone. Consider ideas from this list for each slide.
-
-### Before Starting
-
-- **Pick a bold, content-informed color palette**: The palette should feel designed for THIS topic. If swapping your colors into a completely different presentation would still "work," you haven't made specific enough choices.
-- **Dominance over equality**: One color should dominate (60-70% visual weight), with 1-2 supporting tones and one sharp accent. Never give all colors equal weight.
-- **Dark/light contrast**: Dark backgrounds for title + conclusion slides, light for content ("sandwich" structure). Or commit to dark throughout for a premium feel.
-- **Commit to a visual motif**: Pick ONE distinctive element and repeat it — rounded image frames, icons in colored circles, thick single-side borders. Carry it across every slide.
-
-### Color Palettes
-
-Choose colors that match your topic — don't default to generic blue. Use these palettes as inspiration:
-
-| Theme | Primary | Secondary | Accent |
-|-------|---------|-----------|--------|
-| **Midnight Executive** | `1E2761` (navy) | `CADCFC` (ice blue) | `FFFFFF` (white) |
-| **Forest & Moss** | `2C5F2D` (forest) | `97BC62` (moss) | `F5F5F5` (cream) |
-| **Coral Energy** | `F96167` (coral) | `F9E795` (gold) | `2F3C7E` (navy) |
-| **Warm Terracotta** | `B85042` (terracotta) | `E7E8D1` (sand) | `A7BEAE` (sage) |
-| **Ocean Gradient** | `065A82` (deep blue) | `1C7293` (teal) | `21295C` (midnight) |
-| **Charcoal Minimal** | `36454F` (charcoal) | `F2F2F2` (off-white) | `212121` (black) |
-| **Teal Trust** | `028090` (teal) | `00A896` (seafoam) | `02C39A` (mint) |
-| **Berry & Cream** | `6D2E46` (berry) | `A26769` (dusty rose) | `ECE2D0` (cream) |
-| **Sage Calm** | `84B59F` (sage) | `69A297` (eucalyptus) | `50808E` (slate) |
-| **Cherry Bold** | `990011` (cherry) | `FCF6F5` (off-white) | `2F3C7E` (navy) |
-
-### For Each Slide
-
-**Every slide needs a visual element** — image, chart, icon, or shape. Text-only slides are forgettable.
-
-**Layout options:**
-- Two-column (text left, illustration on right)
-- Icon + text rows (icon in colored circle, bold header, description below)
-- 2x2 or 2x3 grid (image on one side, grid of content blocks on other)
-- Half-bleed image (full left or right side) with content overlay
-
-**Data display:**
-- Large stat callouts (big numbers 60-72pt with small labels below)
-- Comparison columns (before/after, pros/cons, side-by-side options)
-- Timeline or process flow (numbered steps, arrows)
-
-**Visual polish:**
-- Icons in small colored circles next to section headers
-- Italic accent text for key stats or taglines
-
-### Typography
-
-**Choose an interesting font pairing** — don't default to Arial. Pick a header font with personality and pair it with a clean body font.
-
-| Header Font | Body Font |
-|-------------|-----------|
-| Georgia | Calibri |
-| Arial Black | Arial |
-| Calibri | Calibri Light |
-| Cambria | Calibri |
-| Trebuchet MS | Calibri |
-| Impact | Arial |
-| Palatino | Garamond |
-| Consolas | Calibri |
-
-| Element | Size |
-|---------|------|
-| Slide title | 36-44pt bold |
-| Section header | 20-24pt bold |
-| Body text | 14-16pt |
-| Captions | 10-12pt muted |
-
-### Spacing
-
-- 0.5" minimum margins
-- 0.3-0.5" between content blocks
-- Leave breathing room—don't fill every inch
-
-### Avoid (Common Mistakes)
-
-- **Don't repeat the same layout** — vary columns, cards, and callouts across slides
-- **Don't center body text** — left-align paragraphs and lists; center only titles
-- **Don't skimp on size contrast** — titles need 36pt+ to stand out from 14-16pt body
-- **Don't default to blue** — pick colors that reflect the specific topic
-- **Don't mix spacing randomly** — choose 0.3" or 0.5" gaps and use consistently
-- **Don't style one slide and leave the rest plain** — commit fully or keep it simple throughout
-- **Don't create text-only slides** — add images, icons, charts, or visual elements; avoid plain title + bullets
-- **Don't forget text box padding** — when aligning lines or shapes with text edges, set `margin: 0` on the text box or offset the shape to account for padding
-- **Don't use low-contrast elements** — icons AND text need strong contrast against the background; avoid light text on light backgrounds or dark text on dark backgrounds
-- **NEVER use accent lines under titles** — these are a hallmark of AI-generated slides; use whitespace or background color instead
-
----
-
-## QA (Required)
-
-**Assume there are problems. Your job is to find them.**
-
-Your first render is almost never correct. Approach QA as a bug hunt, not a confirmation step. If you found zero issues on first inspection, you weren't looking hard enough.
-
-### Content QA
-
-```bash
-python -m markitdown output.pptx
-```
-
-Check for missing content, typos, wrong order.
-
-**When using templates, check for leftover placeholder text:**
-
-```bash
-python -m markitdown output.pptx | grep -iE "xxxx|lorem|ipsum|this.*(page|slide).*layout"
-```
-
-If grep returns results, fix them before declaring success.
-
-### Visual QA
-
-**⚠️ USE SUBAGENTS** — even for 2-3 slides. You've been staring at the code and will see what you expect, not what's there. Subagents have fresh eyes.
-
-Convert slides to images (see [Converting to Images](#converting-to-images)), then use this prompt:
-
-```
-Visually inspect these slides. Assume there are issues — find them.
-
-Look for:
-- Overlapping elements (text through shapes, lines through words, stacked elements)
-- Text overflow or cut off at edges/box boundaries
-- Decorative lines positioned for single-line text but title wrapped to two lines
-- Source citations or footers colliding with content above
-- Elements too close (< 0.3" gaps) or cards/sections nearly touching
-- Uneven gaps (large empty area in one place, cramped in another)
-- Insufficient margin from slide edges (< 0.5")
-- Columns or similar elements not aligned consistently
-- Low-contrast text (e.g., light gray text on cream-colored background)
-- Low-contrast icons (e.g., dark icons on dark backgrounds without a contrasting circle)
-- Text boxes too narrow causing excessive wrapping
-- Leftover placeholder content
-
-For each slide, list issues or areas of concern, even if minor.
-
-Read and analyze these images:
-1. /path/to/slide-01.jpg (Expected: [brief description])
-2. /path/to/slide-02.jpg (Expected: [brief description])
-
-Report ALL issues found, including minor ones.
-```
-
-### Verification Loop
-
-1. Generate slides → Convert to images → Inspect
-2. **List issues found** (if none found, look again more critically)
-3. Fix issues
-4. **Re-verify affected slides** — one fix often creates another problem
-5. Repeat until a full pass reveals no new issues
-
-**Do not declare success until you've completed at least one fix-and-verify cycle.**
-
----
-
-## Converting to Images
-
-Convert presentations to individual slide images for visual inspection:
-
-```bash
-python scripts/office/soffice.py --headless --convert-to pdf output.pptx
-pdftoppm -jpeg -r 150 output.pdf slide
-```
-
-This creates `slide-01.jpg`, `slide-02.jpg`, etc.
-
-To re-render specific slides after fixes:
-
-```bash
-pdftoppm -jpeg -r 150 -f N -l N output.pdf slide-fixed
-```
-
----
-
-## Dependencies
-
-- `pip install "markitdown[pptx]"` - text extraction
-- `pip install Pillow` - thumbnail grids
-- `npm install -g pptxgenjs` - creating from scratch
-- LibreOffice (`soffice`) - PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
-- Poppler (`pdftoppm`) - PDF to images
+- Start from the right layout: `prs.slide_layouts[0]` is title, `[1]` is title+content, `[5]` is title-only, `[6]` is blank. Inspect `prs.slide_layouts[i].name` on an unfamiliar template.
+- Templates (corporate master decks) override most defaults — when the user supplies one, load it as the starting `Presentation(template.pptx)` rather than `Presentation()`.
+- Fonts must exist on the system where the deck is *rendered*, not where it's *built*. LibreOffice in this image has `fonts-liberation`; for brand fonts the user wants, they must provide the .ttf files at render time.
+- Images: always provide a local path; `add_picture` reads the file when called.

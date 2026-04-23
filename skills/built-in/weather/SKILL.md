@@ -1,7 +1,7 @@
 ---
 name: weather
 description: "Get current weather conditions and short forecasts using `wttr.in` (no API key required). Use when users ask for weather, temperature, forecast, or conditions for a city, region, or location. Triggers on mentions of weather, forecast, temperature, rain, sunny, or climate."
-license: Proprietary. LICENSE.txt has complete terms
+license: MIT (see repository LICENSE)
 compatibility: "Requires curl. Works on macOS, Linux, and Windows."
 ---
 
