@@ -1,3 +1,9 @@
+// klaw fork: save_config_delta_preserving_comments() now bypasses the
+// yaml_edit delta path (see function comment). The helpers below are
+// retained so the upstream tests compile and so we can revive the
+// delta path if yaml_edit's indentation handling is fixed upstream.
+#![allow(dead_code)]
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr;
@@ -21,58 +27,27 @@ struct YamlChange {
 
 pub fn save_config_delta_preserving_comments(
     path: &Path,
-    before: &Config,
+    _before: &Config,
     after: &Config,
 ) -> Result<(), MicroClawError> {
-    if !path.exists() {
-        return after.save_yaml(&path.to_string_lossy());
-    }
-
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        MicroClawError::Config(format!(
-            "Failed to read config file {}: {e}",
-            path.display()
-        ))
-    })?;
-
-    let before_yaml = serde_yaml::to_value(before)
-        .map_err(|e| MicroClawError::Config(format!("Failed to serialize previous config: {e}")))?;
-    let after_yaml = serde_yaml::to_value(after)
-        .map_err(|e| MicroClawError::Config(format!("Failed to serialize updated config: {e}")))?;
-    let changes = collect_changes(&before_yaml, &after_yaml);
-    if changes.is_empty() {
-        return Ok(());
-    }
-
-    let doc = Document::from_str(&raw)
-        .map_err(|e| MicroClawError::Config(format!("Failed to parse YAML config: {e}")))?;
-
-    for change in changes
-        .iter()
-        .filter(|change| matches!(change.kind, ChangeKind::Delete))
-        .rev()
-    {
-        let _ = doc.remove_path(&to_yaml_path(&change.path));
-    }
-
-    for change in changes {
-        if let ChangeKind::Set(value) = &change.kind {
-            set_path_with_serde_value(&doc, &to_yaml_path(&change.path), value).map_err(|e| {
-                MicroClawError::Config(format!("Failed to convert YAML value: {e}"))
-            })?;
-        }
-    }
-
-    let mut rendered = doc.to_string();
-    rendered = restore_leading_comments(&raw, &rendered);
-
-    std::fs::write(path, rendered).map_err(|e| {
-        MicroClawError::Config(format!(
-            "Failed to write config file {}: {e}",
-            path.display()
-        ))
-    })?;
-    Ok(())
+    // NOTE (klaw fork): always do a full rewrite via serde_yaml.
+    //
+    // The original delta path used yaml_edit's Document::set_path to
+    // patch only changed keys so that hand-authored comments in the
+    // config survived saves. In practice, yaml_edit emits newly added
+    // keys at column 0 (no indentation), producing syntactically
+    // malformed YAML. On the next pod boot the file fails to parse and
+    // MicroClaw crashloops. We discovered this when running MicroClaw
+    // as part of the klaw multi-tenant platform where the config lives
+    // on the tenant PVC — the broken save persists across restarts.
+    //
+    // Full serde_yaml rewrite produces a correctly indented document
+    // every time. Comments are not load-bearing for our use case — the
+    // config is rendered from a template at provisioning time and
+    // mutated via the Web UI afterwards, no hand-authored commentary.
+    //
+    // See also upstream bug in yaml_edit re: path creation indentation.
+    after.save_yaml(&path.to_string_lossy())
 }
 
 fn collect_changes(before: &serde_yaml::Value, after: &serde_yaml::Value) -> Vec<YamlChange> {
