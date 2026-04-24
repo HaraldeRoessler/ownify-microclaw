@@ -90,14 +90,17 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Python packages not packaged in Debian (used by pdf / xlsx / pptx / docx / yahoo-finance skills)
+# Python packages not packaged in Debian (used by pdf / xlsx / pptx / docx /
+# yahoo-finance / x-twitter / notion skills; linkedin uses curl only)
 RUN pip3 install --no-cache-dir --break-system-packages \
     pypdf \
     pdfplumber \
     pdf2image \
     python-pptx \
     python-docx \
-    yfinance
+    yfinance \
+    tweepy \
+    notion-client
 
 # docx-js for the docx skill (creating new .docx files via Node)
 RUN npm install -g --omit=dev docx
