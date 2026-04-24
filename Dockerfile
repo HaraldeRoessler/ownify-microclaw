@@ -38,13 +38,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 COPY --from=planner /usr/src/microclaw/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --features channel-matrix
 
 COPY . .
 COPY --from=web-builder /usr/src/microclaw/web/dist ./web/dist
 
 ENV MICROCLAW_SKIP_WEB_BUILD=1
-RUN cargo build --release --locked --bin microclaw
+RUN cargo build --release --locked --bin microclaw --features channel-matrix
 
 # Stage 5: Run
 FROM debian:bookworm-slim

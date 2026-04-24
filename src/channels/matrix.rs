@@ -649,6 +649,17 @@ async fn build_matrix_sdk_client(
         return None;
     }
 
+    // klaw-fork: bootstrap cross-signing on first run so Element users
+    // see the bot's device as verified. Idempotent — on subsequent
+    // restarts this detects existing cross-signing and no-ops. Best-
+    // effort: failure is logged but doesn't abort the channel startup
+    // (the bot still sends E2EE messages, users just see an
+    // "unverified device" warning).
+    match sdk_client.encryption().bootstrap_cross_signing_if_needed(None).await {
+        Ok(()) => info!("Matrix cross-signing bootstrap OK"),
+        Err(e) => warn!("Matrix cross-signing bootstrap failed: {e}"),
+    }
+
     if !runtime.backup_key.trim().is_empty() {
         let mut recovered = false;
         let mut last_err: Option<String> = None;
@@ -1377,16 +1388,55 @@ fn guess_mime_from_extension(path: &Path) -> &'static str {
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("tif") | Some("tiff") => "image/tiff",
+        Some("heic") => "image/heic",
         Some("pdf") => "application/pdf",
-        Some("txt") => "text/plain",
+        Some("txt") | Some("log") => "text/plain",
         Some("json") => "application/json",
-        Some("md") => "text/markdown",
+        Some("jsonl") | Some("ndjson") => "application/x-ndjson",
+        Some("xml") => "application/xml",
+        Some("yaml") | Some("yml") => "application/yaml",
+        Some("md") | Some("markdown") => "text/markdown",
+        Some("html") | Some("htm") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "text/javascript",
+        Some("csv") => "text/csv",
+        Some("tsv") => "text/tab-separated-values",
+        Some("rtf") => "application/rtf",
+        // Microsoft Office — openxml (2007+)
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        // Microsoft Office — legacy binary
+        Some("doc") => "application/msword",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        // OpenDocument
+        Some("odt") => "application/vnd.oasis.opendocument.text",
+        Some("ods") => "application/vnd.oasis.opendocument.spreadsheet",
+        Some("odp") => "application/vnd.oasis.opendocument.presentation",
+        // Archives
         Some("zip") => "application/zip",
+        Some("gz") | Some("tgz") => "application/gzip",
+        Some("tar") => "application/x-tar",
+        Some("bz2") => "application/x-bzip2",
+        Some("7z") => "application/x-7z-compressed",
+        Some("rar") => "application/vnd.rar",
+        // Audio
         Some("mp3") => "audio/mpeg",
         Some("wav") => "audio/wav",
-        Some("ogg") => "audio/ogg",
-        Some("mp4") => "video/mp4",
+        Some("ogg") | Some("oga") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        Some("aac") => "audio/aac",
+        Some("m4a") => "audio/mp4",
+        Some("opus") => "audio/opus",
+        // Video
+        Some("mp4") | Some("m4v") => "video/mp4",
         Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("avi") => "video/x-msvideo",
+        Some("mkv") => "video/x-matroska",
         _ => "application/octet-stream",
     }
 }
@@ -1401,6 +1451,47 @@ fn matrix_msgtype_for_mime(mime: &str) -> &'static str {
     } else {
         "m.file"
     }
+}
+
+// Send an m.typing notification for the bot on a given room.
+// Matrix's typing event auto-expires after `timeout_ms`; the caller
+// must re-send periodically to keep the "…typing" indicator alive
+// in peer clients (Element, etc.). Passing typing=false clears the
+// indicator immediately. Best-effort: failures are logged by the
+// caller and never abort a message response.
+async fn matrix_send_typing(
+    client: &reqwest::Client,
+    homeserver_url: &str,
+    access_token: &str,
+    room_id: &str,
+    user_id: &str,
+    typing: bool,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/typing/{}",
+        homeserver_url.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        urlencoding::encode(user_id),
+    );
+    let body = if typing {
+        serde_json::json!({ "typing": true, "timeout": timeout_ms })
+    } else {
+        serde_json::json!({ "typing": false })
+    };
+    let resp = client
+        .put(&url)
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("typing request send: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("typing {typing} HTTP {status}: {txt}"));
+    }
+    Ok(())
 }
 
 async fn send_matrix_attachment(
@@ -2181,6 +2272,37 @@ async fn handle_matrix_message(
         msg.body.chars().take(100).collect::<String>()
     );
 
+    // Start a periodic typing indicator so Element et al. show
+    // "@klaw-<slug> is typing…" while the agent runs. Matrix expires
+    // the m.typing event after the timeout we specify; we re-send
+    // every 25s to keep it alive. Aborted after the agent responds.
+    // Best-effort: a network blip just makes the indicator flicker.
+    let typing_handle = {
+        let typing_room_id = msg.room_id.clone();
+        let typing_homeserver = runtime.homeserver_url.clone();
+        let typing_token = runtime.access_token.clone();
+        let typing_bot_user = runtime.bot_user_id.clone();
+        tokio::spawn(async move {
+            let http = reqwest::Client::new();
+            loop {
+                if let Err(e) = matrix_send_typing(
+                    &http,
+                    &typing_homeserver,
+                    &typing_token,
+                    &typing_room_id,
+                    &typing_bot_user,
+                    true,
+                    30_000,
+                )
+                .await
+                {
+                    warn!("Matrix typing send failed: {e}");
+                }
+                tokio::time::sleep(Duration::from_secs(25)).await;
+            }
+        })
+    };
+
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     // Check if streaming is enabled for this room
@@ -2340,6 +2462,22 @@ async fn handle_matrix_message(
             }
         }
     }
+
+    // Stop the periodic typing indicator + clear it immediately so peer
+    // clients don't keep showing "…typing" until the matrix-side timeout
+    // (up to 30s). Best-effort: clearing via HTTP can fail without
+    // harm — the indicator will auto-expire.
+    typing_handle.abort();
+    let _ = matrix_send_typing(
+        &reqwest::Client::new(),
+        &runtime.homeserver_url,
+        &runtime.access_token,
+        &msg.room_id,
+        &runtime.bot_user_id,
+        false,
+        0,
+    )
+    .await;
 
     // If messages were queued during this run, re-dispatch to process them.
     maybe_rerun_for_pending(app_state, &runtime.channel_name, chat_id, matrix_chat_type);
