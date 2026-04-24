@@ -448,6 +448,8 @@ enum MatrixIncomingEvent {
         body: String,
         mentioned_bot: bool,
         event_time_ms: Option<i64>,
+        // See MatrixIncomingMessage.image_data.
+        image_data: Option<(String, String)>,
     },
     Reaction {
         room_id: String,
@@ -515,6 +517,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                                 body,
                                 mentioned_bot,
                                 event_time_ms,
+                                image_data,
                             } => {
                                 let msg = MatrixIncomingMessage {
                                     room_id,
@@ -525,6 +528,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                                     mentioned_bot,
                                     prefer_sdk_send: false,
                                     event_time_ms,
+                                    image_data,
                                 };
                                 handle_matrix_message(state, runtime_ctx, msg).await;
                             }
@@ -840,6 +844,42 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
             if is_direct && !runtime.should_process_dm_sender(ev.sender.as_str()) {
                 return;
             }
+
+            // If the event is an m.image, download the bytes (matrix-sdk
+            // handles encrypted attachments transparently) and pass them
+            // to the agent as a vision input. Without this step the LLM
+            // only sees the filename text body, so it either hallucinates
+            // contents or correctly refuses to describe what it can't see.
+            let image_data: Option<(String, String)> = if let MessageType::Image(image_content) = &ev.content.msgtype {
+                let client = room.client();
+                // matrix-sdk's get_file takes the full MessageEventContent
+                // (which impls MediaEventContent) and returns Option<Vec<u8>>
+                // — Some on success, None when the event had no media source.
+                match client.media().get_file(image_content, true).await {
+                    Ok(Some(bytes)) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let mime = image_content
+                            .info
+                            .as_ref()
+                            .and_then(|i| i.mimetype.as_deref())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| guess_image_media_type_from_bytes(&bytes));
+                        Some((b64, mime))
+                    }
+                    Ok(None) => {
+                        warn!("Matrix image event had no downloadable media source");
+                        None
+                    }
+                    Err(e) => {
+                        warn!("Matrix image download failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let msg = MatrixIncomingMessage {
                 room_id,
                 is_direct,
@@ -849,6 +889,7 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
                 mentioned_bot,
                 prefer_sdk_send: true,
                 event_time_ms: None,
+                image_data,
             };
             handle_matrix_message(app_state, runtime, msg).await;
         }
@@ -1045,6 +1086,13 @@ async fn sync_matrix_messages(
                     body,
                     mentioned_bot,
                     event_time_ms: event.get("origin_server_ts").and_then(|v| v.as_i64()),
+                    // Raw HTTP sync path: no SDK client available for
+                    // decrypting encrypted media. Leave unset — the
+                    // agent falls back to the text summary
+                    // "[attachment:m.image] filename". Encrypted DMs
+                    // go through the SDK handler path below which
+                    // does populate image_data.
+                    image_data: None,
                 });
             } else if event_type == "m.reaction" {
                 let key = event
@@ -1453,6 +1501,24 @@ fn matrix_msgtype_for_mime(mime: &str) -> &'static str {
     }
 }
 
+// Fallback MIME sniff for decrypted image bytes when the sender's
+// m.image event didn't include an info.mimetype field. Mirrors the
+// helper in channels/telegram.rs so both channels pass the LLM a
+// consistent media_type.
+fn guess_image_media_type_from_bytes(data: &[u8]) -> String {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png".into()
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg".into()
+    } else if data.starts_with(b"GIF") {
+        "image/gif".into()
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        "image/webp".into()
+    } else {
+        "image/jpeg".into()
+    }
+}
+
 // Send an m.typing notification for the bot on a given room.
 // Matrix's typing event auto-expires after `timeout_ms`; the caller
 // must re-send periodically to keep the "…typing" indicator alive
@@ -1747,6 +1813,12 @@ struct MatrixIncomingMessage {
     mentioned_bot: bool,
     prefer_sdk_send: bool,
     event_time_ms: Option<i64>,
+    /// When the user sends an `m.image` event, matrix-sdk decrypts the
+    /// media (handling both encrypted and unencrypted attachments) and
+    /// we stash (base64_bytes, mime_type) here. Passed through to the
+    /// agent engine as vision input so the LLM can actually see the
+    /// pixels instead of just the filename.
+    image_data: Option<(String, String)>,
 }
 
 struct MatrixIncomingReaction {
@@ -2317,7 +2389,7 @@ async fn handle_matrix_message(
             chat_type: matrix_chat_type,
         },
         None,
-        None,
+        msg.image_data.clone(),
         Some(&event_tx),
         Some(turn_guard),
     )
