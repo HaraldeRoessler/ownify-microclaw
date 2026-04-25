@@ -1268,6 +1268,13 @@ fn extract_matrix_user_ids(text: &str) -> Vec<String> {
 }
 
 fn matrix_message_payload_for_text(chunk: &str) -> Value {
+    // HTTP-API fallback path. Hand-builds the m.room.message JSON because
+    // we're not using the SDK helper here. NOTE: this path does NOT render
+    // markdown — that's only done on the SDK send path (text_markdown). In
+    // the klaw configuration prefer_sdk_send is always true so this fallback
+    // is essentially dead code, but kept for SDK-less setups. If markdown
+    // rendering ever becomes important here, add pulldown-cmark as a direct
+    // dependency and run chunk through it before the html_escape below.
     let user_ids = extract_matrix_user_ids(chunk);
     if user_ids.is_empty() {
         return serde_json::json!({
@@ -1382,7 +1389,13 @@ async fn send_matrix_text_with_sdk(
             .map_err(|e| format!("Invalid Matrix room id '{room_id}': {e}"))?;
         if let Some(room) = sdk_client.get_room(&parsed_room_id) {
             for chunk in split_text(text, 3800) {
-                let mut content = RoomMessageEventContent::text_plain(chunk.clone());
+                // text_markdown runs the chunk through pulldown-cmark and
+                // populates BOTH body (plaintext) and formatted_body (HTML)
+                // on the resulting m.room.message event. Element + every
+                // other Matrix client renders bold/italic/lists/code-blocks
+                // natively from formatted_body. LLM output that's already
+                // plain text passes through unchanged (just wrapped in <p>).
+                let mut content = RoomMessageEventContent::text_markdown(chunk.clone());
                 content.mentions = matrix_mentions_for_text(&chunk);
                 room.send(content)
                     .await
