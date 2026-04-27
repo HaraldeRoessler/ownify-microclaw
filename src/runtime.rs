@@ -455,6 +455,14 @@ pub async fn run(
         registry.register(Arc::new(WebAdapter));
     }
 
+    // Klaw-fork: install the outbound DLP scanner if KLAW_EGRESS_SCAN_URL
+    // is set in env. Filter is consulted by deliver_and_store_bot_message
+    // before each adapter.send_text — see microclaw_channels::channel.
+    if let Some(filter) = crate::egress_scan::ScannerEgressFilter::from_env() {
+        registry.set_egress_filter(filter);
+        info!("klaw egress DLP scanner enabled");
+    }
+
     let channel_registry = Arc::new(registry);
 
     let memory_backend = Arc::new(MemoryBackend::new(

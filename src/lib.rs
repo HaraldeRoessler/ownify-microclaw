@@ -11,6 +11,7 @@ pub mod config;
 pub mod config_persistence;
 pub mod doctor;
 pub mod embedding;
+pub mod egress_scan;
 pub mod gateway;
 pub mod hooks;
 pub mod http_client;
