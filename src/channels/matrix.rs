@@ -448,6 +448,8 @@ enum MatrixIncomingEvent {
         body: String,
         mentioned_bot: bool,
         event_time_ms: Option<i64>,
+        // See MatrixIncomingMessage.image_data.
+        image_data: Option<(String, String)>,
     },
     Reaction {
         room_id: String,
@@ -515,6 +517,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                                 body,
                                 mentioned_bot,
                                 event_time_ms,
+                                image_data,
                             } => {
                                 let msg = MatrixIncomingMessage {
                                     room_id,
@@ -525,6 +528,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                                     mentioned_bot,
                                     prefer_sdk_send: false,
                                     event_time_ms,
+                                    image_data,
                                 };
                                 handle_matrix_message(state, runtime_ctx, msg).await;
                             }
@@ -647,6 +651,17 @@ async fn build_matrix_sdk_client(
     {
         warn!("Matrix SDK restore_session failed: {e}");
         return None;
+    }
+
+    // ownify-fork: bootstrap cross-signing on first run so Element users
+    // see the bot's device as verified. Idempotent — on subsequent
+    // restarts this detects existing cross-signing and no-ops. Best-
+    // effort: failure is logged but doesn't abort the channel startup
+    // (the bot still sends E2EE messages, users just see an
+    // "unverified device" warning).
+    match sdk_client.encryption().bootstrap_cross_signing_if_needed(None).await {
+        Ok(()) => info!("Matrix cross-signing bootstrap OK"),
+        Err(e) => warn!("Matrix cross-signing bootstrap failed: {e}"),
     }
 
     if !runtime.backup_key.trim().is_empty() {
@@ -829,6 +844,42 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
             if is_direct && !runtime.should_process_dm_sender(ev.sender.as_str()) {
                 return;
             }
+
+            // If the event is an m.image, download the bytes (matrix-sdk
+            // handles encrypted attachments transparently) and pass them
+            // to the agent as a vision input. Without this step the LLM
+            // only sees the filename text body, so it either hallucinates
+            // contents or correctly refuses to describe what it can't see.
+            let image_data: Option<(String, String)> = if let MessageType::Image(image_content) = &ev.content.msgtype {
+                let client = room.client();
+                // matrix-sdk's get_file takes the full MessageEventContent
+                // (which impls MediaEventContent) and returns Option<Vec<u8>>
+                // — Some on success, None when the event had no media source.
+                match client.media().get_file(image_content, true).await {
+                    Ok(Some(bytes)) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let mime = image_content
+                            .info
+                            .as_ref()
+                            .and_then(|i| i.mimetype.as_deref())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| guess_image_media_type_from_bytes(&bytes));
+                        Some((b64, mime))
+                    }
+                    Ok(None) => {
+                        warn!("Matrix image event had no downloadable media source");
+                        None
+                    }
+                    Err(e) => {
+                        warn!("Matrix image download failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let msg = MatrixIncomingMessage {
                 room_id,
                 is_direct,
@@ -838,6 +889,7 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
                 mentioned_bot,
                 prefer_sdk_send: true,
                 event_time_ms: None,
+                image_data,
             };
             handle_matrix_message(app_state, runtime, msg).await;
         }
@@ -1034,6 +1086,13 @@ async fn sync_matrix_messages(
                     body,
                     mentioned_bot,
                     event_time_ms: event.get("origin_server_ts").and_then(|v| v.as_i64()),
+                    // Raw HTTP sync path: no SDK client available for
+                    // decrypting encrypted media. Leave unset — the
+                    // agent falls back to the text summary
+                    // "[attachment:m.image] filename". Encrypted DMs
+                    // go through the SDK handler path below which
+                    // does populate image_data.
+                    image_data: None,
                 });
             } else if event_type == "m.reaction" {
                 let key = event
@@ -1209,6 +1268,13 @@ fn extract_matrix_user_ids(text: &str) -> Vec<String> {
 }
 
 fn matrix_message_payload_for_text(chunk: &str) -> Value {
+    // HTTP-API fallback path. Hand-builds the m.room.message JSON because
+    // we're not using the SDK helper here. NOTE: this path does NOT render
+    // markdown — that's only done on the SDK send path (text_markdown). In
+    // the ownify configuration prefer_sdk_send is always true so this fallback
+    // is essentially dead code, but kept for SDK-less setups. If markdown
+    // rendering ever becomes important here, add pulldown-cmark as a direct
+    // dependency and run chunk through it before the html_escape below.
     let user_ids = extract_matrix_user_ids(chunk);
     if user_ids.is_empty() {
         return serde_json::json!({
@@ -1323,7 +1389,13 @@ async fn send_matrix_text_with_sdk(
             .map_err(|e| format!("Invalid Matrix room id '{room_id}': {e}"))?;
         if let Some(room) = sdk_client.get_room(&parsed_room_id) {
             for chunk in split_text(text, 3800) {
-                let mut content = RoomMessageEventContent::text_plain(chunk.clone());
+                // text_markdown runs the chunk through pulldown-cmark and
+                // populates BOTH body (plaintext) and formatted_body (HTML)
+                // on the resulting m.room.message event. Element + every
+                // other Matrix client renders bold/italic/lists/code-blocks
+                // natively from formatted_body. LLM output that's already
+                // plain text passes through unchanged (just wrapped in <p>).
+                let mut content = RoomMessageEventContent::text_markdown(chunk.clone());
                 content.mentions = matrix_mentions_for_text(&chunk);
                 room.send(content)
                     .await
@@ -1377,16 +1449,55 @@ fn guess_mime_from_extension(path: &Path) -> &'static str {
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("tif") | Some("tiff") => "image/tiff",
+        Some("heic") => "image/heic",
         Some("pdf") => "application/pdf",
-        Some("txt") => "text/plain",
+        Some("txt") | Some("log") => "text/plain",
         Some("json") => "application/json",
-        Some("md") => "text/markdown",
+        Some("jsonl") | Some("ndjson") => "application/x-ndjson",
+        Some("xml") => "application/xml",
+        Some("yaml") | Some("yml") => "application/yaml",
+        Some("md") | Some("markdown") => "text/markdown",
+        Some("html") | Some("htm") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "text/javascript",
+        Some("csv") => "text/csv",
+        Some("tsv") => "text/tab-separated-values",
+        Some("rtf") => "application/rtf",
+        // Microsoft Office — openxml (2007+)
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        // Microsoft Office — legacy binary
+        Some("doc") => "application/msword",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        // OpenDocument
+        Some("odt") => "application/vnd.oasis.opendocument.text",
+        Some("ods") => "application/vnd.oasis.opendocument.spreadsheet",
+        Some("odp") => "application/vnd.oasis.opendocument.presentation",
+        // Archives
         Some("zip") => "application/zip",
+        Some("gz") | Some("tgz") => "application/gzip",
+        Some("tar") => "application/x-tar",
+        Some("bz2") => "application/x-bzip2",
+        Some("7z") => "application/x-7z-compressed",
+        Some("rar") => "application/vnd.rar",
+        // Audio
         Some("mp3") => "audio/mpeg",
         Some("wav") => "audio/wav",
-        Some("ogg") => "audio/ogg",
-        Some("mp4") => "video/mp4",
+        Some("ogg") | Some("oga") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        Some("aac") => "audio/aac",
+        Some("m4a") => "audio/mp4",
+        Some("opus") => "audio/opus",
+        // Video
+        Some("mp4") | Some("m4v") => "video/mp4",
         Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("avi") => "video/x-msvideo",
+        Some("mkv") => "video/x-matroska",
         _ => "application/octet-stream",
     }
 }
@@ -1401,6 +1512,65 @@ fn matrix_msgtype_for_mime(mime: &str) -> &'static str {
     } else {
         "m.file"
     }
+}
+
+// Fallback MIME sniff for decrypted image bytes when the sender's
+// m.image event didn't include an info.mimetype field. Mirrors the
+// helper in channels/telegram.rs so both channels pass the LLM a
+// consistent media_type.
+fn guess_image_media_type_from_bytes(data: &[u8]) -> String {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png".into()
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg".into()
+    } else if data.starts_with(b"GIF") {
+        "image/gif".into()
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        "image/webp".into()
+    } else {
+        "image/jpeg".into()
+    }
+}
+
+// Send an m.typing notification for the bot on a given room.
+// Matrix's typing event auto-expires after `timeout_ms`; the caller
+// must re-send periodically to keep the "…typing" indicator alive
+// in peer clients (Element, etc.). Passing typing=false clears the
+// indicator immediately. Best-effort: failures are logged by the
+// caller and never abort a message response.
+async fn matrix_send_typing(
+    client: &reqwest::Client,
+    homeserver_url: &str,
+    access_token: &str,
+    room_id: &str,
+    user_id: &str,
+    typing: bool,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/typing/{}",
+        homeserver_url.trim_end_matches('/'),
+        urlencoding::encode(room_id),
+        urlencoding::encode(user_id),
+    );
+    let body = if typing {
+        serde_json::json!({ "typing": true, "timeout": timeout_ms })
+    } else {
+        serde_json::json!({ "typing": false })
+    };
+    let resp = client
+        .put(&url)
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("typing request send: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("typing {typing} HTTP {status}: {txt}"));
+    }
+    Ok(())
 }
 
 async fn send_matrix_attachment(
@@ -1656,6 +1826,12 @@ struct MatrixIncomingMessage {
     mentioned_bot: bool,
     prefer_sdk_send: bool,
     event_time_ms: Option<i64>,
+    /// When the user sends an `m.image` event, matrix-sdk decrypts the
+    /// media (handling both encrypted and unencrypted attachments) and
+    /// we stash (base64_bytes, mime_type) here. Passed through to the
+    /// agent engine as vision input so the LLM can actually see the
+    /// pixels instead of just the filename.
+    image_data: Option<(String, String)>,
 }
 
 struct MatrixIncomingReaction {
@@ -2181,6 +2357,37 @@ async fn handle_matrix_message(
         msg.body.chars().take(100).collect::<String>()
     );
 
+    // Start a periodic typing indicator so Element et al. show
+    // "@ownify-<slug> is typing…" while the agent runs. Matrix expires
+    // the m.typing event after the timeout we specify; we re-send
+    // every 25s to keep it alive. Aborted after the agent responds.
+    // Best-effort: a network blip just makes the indicator flicker.
+    let typing_handle = {
+        let typing_room_id = msg.room_id.clone();
+        let typing_homeserver = runtime.homeserver_url.clone();
+        let typing_token = runtime.access_token.clone();
+        let typing_bot_user = runtime.bot_user_id.clone();
+        tokio::spawn(async move {
+            let http = reqwest::Client::new();
+            loop {
+                if let Err(e) = matrix_send_typing(
+                    &http,
+                    &typing_homeserver,
+                    &typing_token,
+                    &typing_room_id,
+                    &typing_bot_user,
+                    true,
+                    30_000,
+                )
+                .await
+                {
+                    warn!("Matrix typing send failed: {e}");
+                }
+                tokio::time::sleep(Duration::from_secs(25)).await;
+            }
+        })
+    };
+
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     // Check if streaming is enabled for this room
@@ -2195,7 +2402,7 @@ async fn handle_matrix_message(
             chat_type: matrix_chat_type,
         },
         None,
-        None,
+        msg.image_data.clone(),
         Some(&event_tx),
         Some(turn_guard),
     )
@@ -2340,6 +2547,22 @@ async fn handle_matrix_message(
             }
         }
     }
+
+    // Stop the periodic typing indicator + clear it immediately so peer
+    // clients don't keep showing "…typing" until the matrix-side timeout
+    // (up to 30s). Best-effort: clearing via HTTP can fail without
+    // harm — the indicator will auto-expire.
+    typing_handle.abort();
+    let _ = matrix_send_typing(
+        &reqwest::Client::new(),
+        &runtime.homeserver_url,
+        &runtime.access_token,
+        &msg.room_id,
+        &runtime.bot_user_id,
+        false,
+        0,
+    )
+    .await;
 
     // If messages were queued during this run, re-dispatch to process them.
     maybe_rerun_for_pending(app_state, &runtime.channel_name, chat_id, matrix_chat_type);

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::channel_adapter::ChannelRegistry;
+use crate::egress_filter::EgressDecision;
 use microclaw_storage::db::{call_blocking, Database, StoredMessage};
 
 #[derive(Clone, Debug)]
@@ -232,7 +233,36 @@ pub async fn deliver_and_store_bot_message(
 
     if let Some(adapter) = registry.get(&routing.channel_name) {
         if !adapter.is_local_only() {
-            adapter.send_text(&external_chat_id, text).await?;
+            // ownify-fork: outbound DLP hook. Pass the message through the
+            // egress filter (if installed) before it reaches the adapter.
+            // Refuse short-circuits delivery; redact substitutes the body.
+            // Skipped for is_local_only() adapters — those don't actually
+            // egress (web is in-process only).
+            let to_send: String = match registry.egress_filter() {
+                Some(filter) => match filter.screen(&routing.channel_name, text).await {
+                    EgressDecision::Allow => text.to_string(),
+                    EgressDecision::Redact { body } => body,
+                    EgressDecision::Refuse { reason } => {
+                        return Err(format!("egress refused: {reason}"));
+                    }
+                },
+                None => text.to_string(),
+            };
+            adapter.send_text(&external_chat_id, &to_send).await?;
+            // Persist what was actually sent (post-redaction) so the
+            // session transcript matches what the channel saw — auditing
+            // and reflector replay are consistent with reality.
+            let msg = StoredMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                chat_id,
+                sender_name: bot_username.to_string(),
+                content: to_send,
+                is_from_bot: true,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            return call_blocking(db.clone(), move |d| d.store_message(&msg))
+                .await
+                .map_err(|e| format!("Failed to store sent message: {e}"));
         }
     } else {
         return Err(format!(
@@ -241,6 +271,7 @@ pub async fn deliver_and_store_bot_message(
         ));
     }
 
+    // Local-only adapters (e.g. web) — no egress, store as-sent verbatim.
     let msg = StoredMessage {
         id: uuid::Uuid::new_v4().to_string(),
         chat_id,
