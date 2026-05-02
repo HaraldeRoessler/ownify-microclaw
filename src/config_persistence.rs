@@ -1,4 +1,4 @@
-// klaw fork: save_config_delta_preserving_comments() now bypasses the
+// ownify fork: save_config_delta_preserving_comments() now bypasses the
 // yaml_edit delta path (see function comment). The helpers below are
 // retained so the upstream tests compile and so we can revive the
 // delta path if yaml_edit's indentation handling is fixed upstream.
@@ -30,7 +30,7 @@ pub fn save_config_delta_preserving_comments(
     _before: &Config,
     after: &Config,
 ) -> Result<(), MicroClawError> {
-    // NOTE (klaw fork): always do a full rewrite via serde_yaml.
+    // NOTE (ownify fork): always do a full rewrite via serde_yaml.
     //
     // The original delta path used yaml_edit's Document::set_path to
     // patch only changed keys so that hand-authored comments in the
@@ -38,7 +38,7 @@ pub fn save_config_delta_preserving_comments(
     // keys at column 0 (no indentation), producing syntactically
     // malformed YAML. On the next pod boot the file fails to parse and
     // MicroClaw crashloops. We discovered this when running MicroClaw
-    // as part of the klaw multi-tenant platform where the config lives
+    // as part of the ownify multi-tenant platform where the config lives
     // on the tenant PVC — the broken save persists across restarts.
     //
     // Full serde_yaml rewrite produces a correctly indented document

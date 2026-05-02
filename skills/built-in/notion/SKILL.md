@@ -112,7 +112,7 @@ python3 - <<'PY'
 import os, sys, json
 from notion_client import Client
 DB_ID = sys.argv[1]
-TITLE = sys.argv[2] if len(sys.argv) > 2 else "Created from klaw agent"
+TITLE = sys.argv[2] if len(sys.argv) > 2 else "Created from ownify agent"
 n = Client(auth=os.environ["NOTION_API_KEY"])
 
 page = n.pages.create(
@@ -124,7 +124,7 @@ page = n.pages.create(
         # "Status": {"status": {"name": "Not started"}},
         # "Priority": {"select": {"name": "High"}},
         # "Due date": {"date": {"start": "2026-05-01"}},
-        # "Tags": {"multi_select": [{"name": "klaw"}, {"name": "automation"}]},
+        # "Tags": {"multi_select": [{"name": "ownify"}, {"name": "automation"}]},
     },
     children=[
         {

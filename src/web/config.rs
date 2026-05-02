@@ -655,7 +655,7 @@ pub(super) async fn api_config_self_check(
         }
     }
 
-    // klaw-fork: platform-managed deployments (Kubernetes, single-tenant pods
+    // ownify-fork: platform-managed deployments (Kubernetes, single-tenant pods
     // behind an authenticated reverse proxy) legitimately cannot satisfy some
     // of microclaw's single-host heuristics (loopback-only binding, host-level
     // sandbox). The operator can list warning codes to omit from the response

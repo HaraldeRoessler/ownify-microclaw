@@ -21,7 +21,7 @@ One env var on the agent (configure from portal Settings → Skills → X):
 python3 - <<'PY'
 import os, tweepy, json
 client = tweepy.Client(bearer_token=os.environ["X_BEARER_TOKEN"])
-r = client.create_tweet(text="Hello from my klaw agent.")
+r = client.create_tweet(text="Hello from my ownify agent.")
 print(json.dumps({"id": r.data["id"], "text": r.data["text"]}, indent=2))
 PY
 ```
@@ -86,7 +86,7 @@ PY
 ```bash
 python3 - <<'PY'
 import os, tweepy, sys
-QUERY = sys.argv[1] if len(sys.argv) > 1 else "klaw"
+QUERY = sys.argv[1] if len(sys.argv) > 1 else "ownify"
 client = tweepy.Client(bearer_token=os.environ["X_BEARER_TOKEN"])
 results = client.search_recent_tweets(
     query=QUERY,

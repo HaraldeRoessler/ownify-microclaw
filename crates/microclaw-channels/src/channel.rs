@@ -233,7 +233,7 @@ pub async fn deliver_and_store_bot_message(
 
     if let Some(adapter) = registry.get(&routing.channel_name) {
         if !adapter.is_local_only() {
-            // Klaw-fork: outbound DLP hook. Pass the message through the
+            // ownify-fork: outbound DLP hook. Pass the message through the
             // egress filter (if installed) before it reaches the adapter.
             // Refuse short-circuits delivery; redact substitutes the body.
             // Skipped for is_local_only() adapters — those don't actually

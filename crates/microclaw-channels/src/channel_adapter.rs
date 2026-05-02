@@ -46,7 +46,7 @@ pub struct ChannelRegistry {
     type_to_channel: HashMap<String, String>,
     /// "slack_dm" -> Private, "group" -> Group, etc.
     type_to_conversation: HashMap<String, ConversationKind>,
-    /// Klaw-fork: optional outbound DLP hook. Consulted by
+    /// ownify-fork: optional outbound DLP hook. Consulted by
     /// `deliver_and_store_bot_message` before each `send_text`. None ⇒
     /// pass-through (upstream microclaw behaviour).
     egress_filter: Option<EgressFilterArc>,
@@ -94,7 +94,7 @@ impl ChannelRegistry {
         !self.adapters.is_empty()
     }
 
-    /// Klaw-fork: install the outbound DLP filter. Should be called once
+    /// ownify-fork: install the outbound DLP filter. Should be called once
     /// at boot, before the registry is wrapped in `Arc`. A second call
     /// replaces the prior filter.
     pub fn set_egress_filter(&mut self, filter: EgressFilterArc) {

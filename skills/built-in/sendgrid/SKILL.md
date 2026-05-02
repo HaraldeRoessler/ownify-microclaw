@@ -28,7 +28,7 @@ curl -sS -w "\nHTTP %{http_code}\n" -X POST https://api.sendgrid.com/v3/mail/sen
 {
   "personalizations": [{"to": [{"email": "recipient@example.com"}]}],
   "from": {"email": "${SENDGRID_FROM_EMAIL}"},
-  "subject": "Hello from klaw",
+  "subject": "Hello from ownify",
   "content": [{"type": "text/plain", "value": "This is the body of the message."}]
 }
 JSON
@@ -45,7 +45,7 @@ curl -sS -w "\nHTTP %{http_code}\n" -X POST https://api.sendgrid.com/v3/mail/sen
   --data @- <<JSON
 {
   "personalizations": [{"to": [{"email": "recipient@example.com", "name": "Jane Doe"}]}],
-  "from": {"email": "${SENDGRID_FROM_EMAIL}", "name": "klaw agent"},
+  "from": {"email": "${SENDGRID_FROM_EMAIL}", "name": "ownify agent"},
   "reply_to": {"email": "${SENDGRID_FROM_EMAIL}"},
   "subject": "Weekly summary",
   "content": [

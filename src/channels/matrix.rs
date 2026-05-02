@@ -653,7 +653,7 @@ async fn build_matrix_sdk_client(
         return None;
     }
 
-    // klaw-fork: bootstrap cross-signing on first run so Element users
+    // ownify-fork: bootstrap cross-signing on first run so Element users
     // see the bot's device as verified. Idempotent — on subsequent
     // restarts this detects existing cross-signing and no-ops. Best-
     // effort: failure is logged but doesn't abort the channel startup
@@ -1271,7 +1271,7 @@ fn matrix_message_payload_for_text(chunk: &str) -> Value {
     // HTTP-API fallback path. Hand-builds the m.room.message JSON because
     // we're not using the SDK helper here. NOTE: this path does NOT render
     // markdown — that's only done on the SDK send path (text_markdown). In
-    // the klaw configuration prefer_sdk_send is always true so this fallback
+    // the ownify configuration prefer_sdk_send is always true so this fallback
     // is essentially dead code, but kept for SDK-less setups. If markdown
     // rendering ever becomes important here, add pulldown-cmark as a direct
     // dependency and run chunk through it before the html_escape below.
@@ -2358,7 +2358,7 @@ async fn handle_matrix_message(
     );
 
     // Start a periodic typing indicator so Element et al. show
-    // "@klaw-<slug> is typing…" while the agent runs. Matrix expires
+    // "@ownify-<slug> is typing…" while the agent runs. Matrix expires
     // the m.typing event after the timeout we specify; we re-send
     // every 25s to keep it alive. Aborted after the agent responds.
     // Best-effort: a network blip just makes the indicator flicker.

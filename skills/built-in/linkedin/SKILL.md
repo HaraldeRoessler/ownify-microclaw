@@ -45,7 +45,7 @@ curl -sS -X POST https://api.linkedin.com/v2/ugcPosts \
   "lifecycleState": "PUBLISHED",
   "specificContent": {
     "com.linkedin.ugc.ShareContent": {
-      "shareCommentary": {"text": "Hello from my klaw agent."},
+      "shareCommentary": {"text": "Hello from my ownify agent."},
       "shareMediaCategory": "NONE"
     }
   },

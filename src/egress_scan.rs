@@ -1,17 +1,23 @@
-//! Klaw-fork: outbound DLP scanner client. Phase 3k v1.
+//! ownify-fork: outbound DLP scanner client. Phase 3k v1.
 //!
 //! Implements `microclaw_channels::egress_filter::EgressFilter` against
-//! the cluster-side klaw-egress-scanner service. The scanner does the
+//! the cluster-side ownify-egress-scanner service. The scanner does the
 //! pattern matching and decides allow / redact / refuse / alert.
 //!
 //! Configuration (env, read at boot):
-//!   KLAW_EGRESS_SCAN_URL   — base URL (e.g. http://klaw-egress-scanner.klaw-web.svc.cluster.local:4500)
-//!                            unset → no filter installed (transparent).
-//!   KLAW_EGRESS_SCAN_TOKEN — optional Bearer presented to /scan.
-//!   KLAW_TENANT_SLUG       — tenant slug, recorded in audit rows.
-//!   KLAW_EGRESS_FAIL_OPEN  — "1" / "true" → allow on scanner outage.
-//!                            Default = fail-closed (refuse) so a scanner
-//!                            outage can't silently disable DLP.
+//!   OWNIFY_EGRESS_SCAN_URL   — base URL (e.g.
+//!                              http://ownify-egress-scanner-<slug>.ownify-tenant-<slug>.svc.cluster.local:4500)
+//!                              unset → no filter installed (transparent).
+//!   OWNIFY_EGRESS_SCAN_TOKEN — optional Bearer presented to /scan.
+//!   OWNIFY_TENANT_SLUG       — tenant slug, recorded in audit rows.
+//!   OWNIFY_EGRESS_FAIL_OPEN  — "1" / "true" → allow on scanner outage.
+//!                              Default = fail-closed (refuse) so a scanner
+//!                              outage can't silently disable DLP.
+//!
+//! Backwards compatibility: if the OWNIFY_* variant is unset but the
+//! legacy KLAW_* variant is set, the latter is read with a one-time
+//! deprecation warning. This lets operators upgrade microclaw before /
+//! after the control-plane KLAW→OWNIFY rebrand, in either order.
 
 use async_trait::async_trait;
 use microclaw_channels::egress_filter::{EgressDecision, EgressFilter};
@@ -55,22 +61,39 @@ struct ScanResponse {
     hits: Vec<ScanHit>,
 }
 
+/// Read an env var preferring the OWNIFY_* name; fall back to the
+/// legacy KLAW_* name with a one-time deprecation warning. Empty
+/// values are treated as unset.
+fn read_env(ownify_name: &str, klaw_name: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(ownify_name) {
+        if !v.trim().is_empty() {
+            return Some(v);
+        }
+    }
+    match std::env::var(klaw_name) {
+        Ok(v) if !v.trim().is_empty() => {
+            warn!(
+                "{klaw_name} is deprecated — set {ownify_name} instead. \
+                 Reading legacy value for backwards compatibility."
+            );
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
 impl ScannerEgressFilter {
-    /// Build the filter from process env. Returns None if KLAW_EGRESS_SCAN_URL
-    /// is unset — caller should skip installing the filter in that case.
+    /// Build the filter from process env. Returns None if OWNIFY_EGRESS_SCAN_URL
+    /// (or the legacy KLAW_EGRESS_SCAN_URL) is unset — caller should skip
+    /// installing the filter in that case.
     pub fn from_env() -> Option<Arc<dyn EgressFilter>> {
-        let base_url = std::env::var("KLAW_EGRESS_SCAN_URL").ok()?;
+        let base_url = read_env("OWNIFY_EGRESS_SCAN_URL", "KLAW_EGRESS_SCAN_URL")?;
         if base_url.trim().is_empty() {
             return None;
         }
-        let bearer = std::env::var("KLAW_EGRESS_SCAN_TOKEN")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
-        let slug = std::env::var("KLAW_TENANT_SLUG")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
-        let fail_open = std::env::var("KLAW_EGRESS_FAIL_OPEN")
-            .ok()
+        let bearer = read_env("OWNIFY_EGRESS_SCAN_TOKEN", "KLAW_EGRESS_SCAN_TOKEN");
+        let slug = read_env("OWNIFY_TENANT_SLUG", "KLAW_TENANT_SLUG");
+        let fail_open = read_env("OWNIFY_EGRESS_FAIL_OPEN", "KLAW_EGRESS_FAIL_OPEN")
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
         let http = reqwest::Client::builder()

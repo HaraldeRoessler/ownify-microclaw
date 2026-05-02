@@ -1,8 +1,8 @@
-//! Egress (outbound) DLP hook. Klaw-fork addition (Phase 3k v1).
+//! Egress (outbound) DLP hook. ownify-fork addition (Phase 3k v1).
 //!
 //! Outbound delivery passes every text message through an `EgressFilter`
 //! before it reaches the channel adapter. The filter is meant to be wired
-//! to klaw-egress-scanner (a separate cluster service) but the trait stays
+//! to ownify-egress-scanner (a separate cluster service) but the trait stays
 //! transport-agnostic so upstream microclaw deployments can plug their own.
 //!
 //! Default behaviour when no filter is registered: pass-through. The hook
@@ -10,7 +10,7 @@
 //! `ChannelRegistry::set_egress_filter`.
 //!
 //! Failure policy is decided by the concrete impl, not this trait. The
-//! klaw-fork impl in `src/egress_scan.rs` defaults to fail-closed (refuse
+//! ownify-fork impl in `src/egress_scan.rs` defaults to fail-closed (refuse
 //! send) when the scanner is configured but unreachable, so an outage of
 //! the scanner doesn't silently disable DLP.
 
