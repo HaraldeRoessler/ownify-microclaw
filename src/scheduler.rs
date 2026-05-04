@@ -148,6 +148,7 @@ async fn run_due_tasks(state: &Arc<AppState>) {
                 caller_channel: &routing.channel_name,
                 chat_id: task.chat_id,
                 chat_type: routing.conversation.as_agent_chat_type(),
+                allowed_tools: None,
             },
             Some(&task.prompt),
             None,

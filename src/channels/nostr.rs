@@ -456,6 +456,7 @@ async fn nostr_webhook_handler(
             } else {
                 "group"
             },
+            allowed_tools: None,
         },
         None,
         None,

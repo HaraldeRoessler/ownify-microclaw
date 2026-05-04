@@ -311,6 +311,7 @@ impl Agent for MicroClawAcpAgent {
             caller_channel: ACP_CHANNEL,
             chat_id,
             chat_type: ACP_CHAT_TYPE,
+            allowed_tools: None,
         };
         let result = process_with_agent_with_events(
             &self.app_state,

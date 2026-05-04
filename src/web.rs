@@ -762,6 +762,13 @@ struct SendRequest {
     session_key: Option<String>,
     sender_name: Option<String>,
     message: String,
+    /// Optional per-request tool allowlist. NOT deserialized from
+    /// JSON — set internally by the A2A inbound path when the
+    /// `x-ownify-caller-kind: external` header is present so external
+    /// callers see only a fenced tool surface. Owner-side web POSTs
+    /// leave this None (full tool access).
+    #[serde(skip_deserializing, default)]
+    allowed_tools: Option<&'static [&'static str]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1636,6 +1643,7 @@ async fn api_hook_agent(
         session_key: Some(session_key),
         sender_name: body.sender_name.or(body.name),
         message: body.message,
+        allowed_tools: None,
     };
     stream::start_stream_run_with_actor(state, send, "hook:token".to_string(), "/hooks/agent").await
 }
@@ -1687,6 +1695,7 @@ async fn api_hook_wake(
         session_key: Some(session_key),
         sender_name: Some(sender_name),
         message,
+        allowed_tools: None,
     };
     stream::start_stream_run_with_actor(state, send, "hook:token".to_string(), "/hooks/wake").await
 }
@@ -1791,6 +1800,7 @@ async fn send_and_store_response_with_events(
         caller_channel: "web",
         chat_id,
         chat_type: "web",
+        allowed_tools: body.allowed_tools,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let saw_send_message_tool = Arc::new(AtomicBool::new(false));

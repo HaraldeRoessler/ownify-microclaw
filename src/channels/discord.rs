@@ -598,6 +598,7 @@ impl EventHandler for Handler {
                 caller_channel: &self.runtime.channel_name,
                 chat_id: channel_id,
                 chat_type: discord_chat_type,
+                allowed_tools: None,
             },
             None,
             None,

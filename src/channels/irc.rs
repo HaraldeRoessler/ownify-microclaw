@@ -526,6 +526,7 @@ async fn handle_irc_message(
             caller_channel: "irc",
             chat_id,
             chat_type: runtime_chat_type,
+            allowed_tools: None,
         },
         None,
         None,

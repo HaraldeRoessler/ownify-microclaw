@@ -574,6 +574,7 @@ async fn process_email_webhook_message(
             caller_channel: &runtime_ctx.channel_name,
             chat_id,
             chat_type: "private",
+            allowed_tools: None,
         },
         None,
         None,

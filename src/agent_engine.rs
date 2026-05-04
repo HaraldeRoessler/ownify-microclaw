@@ -33,6 +33,14 @@ pub struct AgentRequestContext<'a> {
     pub caller_channel: &'a str,
     pub chat_id: i64,
     pub chat_type: &'a str,
+    /// Optional per-request allowlist of tool names exposed to the LLM.
+    /// `None` (default) = all registered tools — the historical
+    /// behaviour every channel relies on. `Some(&[...])` = only these
+    /// tool names are visible to the LLM and accepted by execute. Used
+    /// by ownify's A2A inbound to fence external (non-tenant) callers
+    /// to a reduced tool surface. Owner-side channels (web UI, matrix,
+    /// scheduler, …) leave this None.
+    pub allowed_tools: Option<&'a [&'a str]>,
 }
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -234,6 +242,7 @@ pub fn maybe_rerun_for_pending(state: Arc<AppState>, channel: &str, chat_id: i64
             caller_channel: &channel,
             chat_id,
             chat_type: &chat_type,
+            allowed_tools: None,
         };
         if let Err(e) = process_with_agent_with_events(&state, ctx, None, None, None).await {
             warn!(
@@ -844,7 +853,26 @@ async fn process_with_agent_logic(
         );
     }
 
-    let tool_defs = state.tools.definitions().to_vec();
+    // Build the tool list visible to the LLM. If the request context
+    // carries a per-call allowlist (used by ownify's external A2A
+    // path), filter the registry to those names — the LLM never sees
+    // disallowed tools, can't request them, can't be jailbroken into
+    // calling bash / write_memory / a2a_send / etc. on a public-facing
+    // surface. None (the default) preserves the historical full-tools
+    // behaviour every owner-side channel relies on.
+    let tool_defs: Vec<_> = match context.allowed_tools {
+        None => state.tools.definitions().to_vec(),
+        Some(allow) => {
+            let allow_set: std::collections::HashSet<&str> =
+                allow.iter().copied().collect();
+            state
+                .tools
+                .definitions()
+                .into_iter()
+                .filter(|d| allow_set.contains(d.name.as_str()))
+                .collect()
+        }
+    };
     let mut skill_env_files: Vec<String> = {
         let db = state.db.clone();
         call_blocking(db, move |db| db.load_session_skill_envs(chat_id))
@@ -2687,6 +2715,7 @@ mod tests {
                     caller_channel,
                     chat_id,
                     chat_type,
+                    allowed_tools: None,
                 },
                 None,
                 None,
@@ -2747,6 +2776,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -2769,6 +2799,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -2819,6 +2850,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -2896,6 +2928,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -3213,6 +3246,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -3251,6 +3285,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -3299,6 +3334,7 @@ mod tests {
                 caller_channel: "feishu",
                 chat_id,
                 chat_type: "private",
+                allowed_tools: None,
             },
             None,
             None,
@@ -3342,6 +3378,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -3381,6 +3418,7 @@ mod tests {
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,
@@ -3682,6 +3720,7 @@ timeout_ms: 1000
                 caller_channel: "web",
                 chat_id,
                 chat_type: "web",
+                allowed_tools: None,
             },
             None,
             None,

@@ -2400,6 +2400,7 @@ async fn handle_matrix_message(
             caller_channel: &runtime.channel_name,
             chat_id,
             chat_type: matrix_chat_type,
+            allowed_tools: None,
         },
         None,
         msg.image_data.clone(),

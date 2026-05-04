@@ -4,6 +4,38 @@ use crate::a2a::{
     A2AMessageResponse, A2A_PROTOCOL_VERSION,
 };
 
+/// Tool allowlist for external (non-tenant) A2A callers. Set when the
+/// gateway forwards `x-ownify-caller-kind: external`. Deliberately
+/// narrow: read-only public-information tools only. No bash, no file
+/// I/O, no memory writes/reads, no a2a_send (peer hop), no scheduler,
+/// no sub-agents, no skill management, no send_message. Anything that
+/// could leak tenant state, exfiltrate data, or chain into an internal
+/// system is excluded by construction.
+const EXTERNAL_A2A_TOOLS: &[&str] = &[
+    "web_search",
+    "web_fetch",
+    "get_current_time",
+    "compare_time",
+    "calculate",
+];
+
+/// Read the `x-ownify-caller-kind` header set by ownify-a2a-gateway.
+/// Currently recognises `external` only — anything else (or missing)
+/// resolves to None and the call gets the full tool surface, the
+/// historical behaviour matrix/web/scheduler relied on.
+fn allowed_tools_for_caller(headers: &HeaderMap) -> Option<&'static [&'static str]> {
+    let kind = headers
+        .get("x-ownify-caller-kind")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+    if kind.eq_ignore_ascii_case("external") {
+        Some(EXTERNAL_A2A_TOOLS)
+    } else {
+        None
+    }
+}
+
 fn a2a_token_allowed(config: &Config, headers: &HeaderMap) -> bool {
     let Some(raw) = headers.get("authorization").and_then(|v| v.to_str().ok()) else {
         return false;
@@ -81,12 +113,14 @@ pub(super) async fn api_a2a_message(
         })
         .unwrap_or_else(|| "a2a-remote".to_string());
 
+    let allowed_tools = allowed_tools_for_caller(&headers);
     let result = super::send_and_store_response(
         state.clone(),
         super::SendRequest {
             session_key: Some(session_key.clone()),
             sender_name: Some(sender_name),
             message,
+            allowed_tools,
         },
     )
     .await?;

@@ -665,6 +665,7 @@ async fn handle_whatsapp_message(
             caller_channel: &runtime.channel_name,
             chat_id,
             chat_type: "private",
+            allowed_tools: None,
         },
         None,
         None,

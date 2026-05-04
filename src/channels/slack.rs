@@ -1205,6 +1205,7 @@ async fn handle_slack_message(
             caller_channel: &runtime.channel_name,
             chat_id,
             chat_type: slack_chat_type,
+            allowed_tools: None,
         },
         None,
         image_data,

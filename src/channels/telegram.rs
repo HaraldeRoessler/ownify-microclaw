@@ -1121,6 +1121,7 @@ async fn handle_message(
             caller_channel: &tg_channel_name,
             chat_id,
             chat_type: runtime_chat_type,
+            allowed_tools: None,
         },
         None,
         image_data,
