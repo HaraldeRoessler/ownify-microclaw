@@ -510,6 +510,7 @@ impl EventHandler for Handler {
                     caller_chat_id: channel_id,
                     control_chat_ids: self.app_state.config.control_chat_ids.clone(),
                     env_files: Vec::new(),
+                    caller_kind: "internal".to_string(),
                 };
                 let routed = self
                     .app_state

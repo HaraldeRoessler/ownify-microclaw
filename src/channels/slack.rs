@@ -1130,6 +1130,7 @@ async fn handle_slack_message(
                 caller_chat_id: chat_id,
                 control_chat_ids: app_state.config.control_chat_ids.clone(),
                 env_files: Vec::new(),
+                caller_kind: "internal".to_string(),
             };
             let routed = app_state
                 .tools

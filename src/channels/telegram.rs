@@ -1025,6 +1025,7 @@ async fn handle_message(
                 caller_chat_id: chat_id,
                 control_chat_ids: state.config.control_chat_ids.clone(),
                 env_files: Vec::new(),
+                caller_kind: "internal".to_string(),
             };
             let routed = state
                 .tools

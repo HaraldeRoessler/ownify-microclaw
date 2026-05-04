@@ -669,6 +669,7 @@ mod tests {
             caller_chat_id: 1,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let first = registry.execute_with_auth("bash", json!({}), &auth).await;
@@ -706,6 +707,7 @@ mod tests {
             caller_chat_id: 123,
             control_chat_ids: vec![123],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let first = registry.execute_with_auth("bash", json!({}), &auth).await;
@@ -741,6 +743,7 @@ mod tests {
             caller_chat_id: 1,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let result = registry.execute_with_auth("bash", json!({}), &auth).await;
@@ -767,6 +770,7 @@ mod tests {
             caller_chat_id: 123,
             control_chat_ids: vec![123],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let result = registry.execute_with_auth("bash", json!({}), &auth).await;
@@ -790,6 +794,7 @@ mod tests {
             caller_chat_id: 1,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let result = registry
@@ -841,6 +846,7 @@ tools:
             caller_chat_id: 7,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let defs = registry.definitions();
@@ -871,6 +877,7 @@ tools:
             caller_chat_id: 8009499081,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let result = registry
@@ -901,6 +908,7 @@ tools:
             caller_chat_id: 8009499081,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let result = registry
@@ -931,6 +939,7 @@ tools:
             caller_chat_id: 9001,
             control_chat_ids: vec![],
             env_files: vec![],
+            caller_kind: "internal".to_string(),
         };
 
         let result = registry

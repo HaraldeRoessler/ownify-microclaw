@@ -150,6 +150,19 @@ impl Tool for ReadMemoryTool {
             None => return ToolResult::error("Missing 'scope' parameter".into()),
         };
 
+        // External callers (per-request fenced identities) get only
+        // chat-scoped reads. global + bot are tenant-shared surfaces
+        // and would leak between visitors, so refuse those scopes
+        // here with a clear message the LLM can retry on.
+        if let Some(auth) = auth_context_from_input(&input) {
+            if auth.caller_kind == "external" && scope != "chat" {
+                return ToolResult::error(format!(
+                    "Permission denied: external callers may only read chat-scoped memory; \
+                     scope '{scope}' is tenant-shared. Retry with scope=\"chat\"."
+                ));
+            }
+        }
+
         let path = match scope {
             "global" => self.groups_dir.join("AGENTS.md"),
             "bot" => {
@@ -247,6 +260,18 @@ impl Tool for WriteMemoryTool {
             Some(c) => c,
             None => return ToolResult::error("Missing 'content' parameter".into()),
         };
+
+        // External callers (per-request fenced identities) get only
+        // chat-scoped writes. global + bot would leak between visitors;
+        // refuse with a clear message the LLM can retry on.
+        if let Some(auth) = auth_context_from_input(&input) {
+            if auth.caller_kind == "external" && scope != "chat" {
+                return ToolResult::error(format!(
+                    "Permission denied: external callers may only write chat-scoped memory; \
+                     scope '{scope}' is tenant-shared. Retry with scope=\"chat\"."
+                ));
+            }
+        }
 
         let (path, memory_chat_id) = match scope {
             "global" => {

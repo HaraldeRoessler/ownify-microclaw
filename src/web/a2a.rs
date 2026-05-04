@@ -6,17 +6,26 @@ use crate::a2a::{
 
 /// Tool allowlist for external (non-tenant) A2A callers. Set when the
 /// gateway forwards `x-ownify-caller-kind: external`. Deliberately
-/// narrow: read-only public-information tools only. No bash, no file
-/// I/O, no memory writes/reads, no a2a_send (peer hop), no scheduler,
-/// no sub-agents, no skill management, no send_message. Anything that
-/// could leak tenant state, exfiltrate data, or chain into an internal
-/// system is excluded by construction.
+/// narrow: read-only public-information tools, time/math, plus
+/// CHAT-scoped memory so the agent can remember things visitor-by-
+/// visitor. The memory tools self-fence the global + bot scopes for
+/// external callers (see ReadMemoryTool/WriteMemoryTool::execute);
+/// chat scope is per-session_key (= per-visitor cookie when called
+/// via dsncon's signed widget) so visitor A's writes never leak to
+/// visitor B's reads.
+///
+/// Excluded by construction: bash, file I/O, peer a2a_send, the
+/// scheduler, sub-agents, skill management, send_message, and any
+/// MCP-server-provided tool (mcp_*) that points at tenant-shared
+/// storage.
 const EXTERNAL_A2A_TOOLS: &[&str] = &[
     "web_search",
     "web_fetch",
     "get_current_time",
     "compare_time",
     "calculate",
+    "read_memory",   // chat-scope only — non-chat scopes refused inside the tool
+    "write_memory",  // chat-scope only — non-chat scopes refused inside the tool
 ];
 
 /// Read the `x-ownify-caller-kind` header set by ownify-a2a-gateway.

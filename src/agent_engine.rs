@@ -885,6 +885,17 @@ async fn process_with_agent_logic(
         caller_chat_id: chat_id,
         control_chat_ids: state.config.control_chat_ids.clone(),
         env_files: skill_env_files.clone(),
+        // Derive caller kind from the per-request allowlist: any
+        // request that ships an explicit allowed_tools is by
+        // construction a fenced caller (today: external A2A).
+        // Memory tools and other capability-aware tools key off
+        // this to refuse tenant-shared scopes for non-tenant
+        // identities. None -> the historical full-trust path.
+        caller_kind: if context.allowed_tools.is_some() {
+            "external".to_string()
+        } else {
+            "internal".to_string()
+        },
     };
 
     // Agentic tool-use loop

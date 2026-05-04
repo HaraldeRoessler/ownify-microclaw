@@ -867,6 +867,7 @@ impl Tool for SessionsSpawnTool {
             caller_chat_id: chat_id,
             control_chat_ids: auth.control_chat_ids.clone(),
             env_files: auth.env_files.clone(),
+            caller_kind: "internal".to_string(),
         };
         let channel_registry = self.channel_registry.clone();
         let subagent_channel_registry = self.channel_registry.clone();

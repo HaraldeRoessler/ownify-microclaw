@@ -212,6 +212,13 @@ pub struct ToolAuthContext {
     pub caller_chat_id: i64,
     pub control_chat_ids: Vec<i64>,
     pub env_files: Vec<String>,
+    /// Identity classification of the caller.
+    /// "internal" (default) = the agent's own owner / a peer ownify
+    /// tenant — historical full-trust path.
+    /// "external" = a non-tenant identity (e.g. dsncon-web signing as
+    /// its own DID). Tools that expose tenant-shared state should
+    /// fence non-chat scopes when this is "external".
+    pub caller_kind: String,
 }
 
 impl ToolAuthContext {
@@ -248,11 +255,17 @@ pub fn auth_context_from_input(input: &serde_json::Value) -> Option<ToolAuthCont
                 .collect()
         })
         .unwrap_or_default();
+    let caller_kind = ctx
+        .get("caller_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("internal")
+        .to_string();
     Some(ToolAuthContext {
         caller_channel,
         caller_chat_id,
         control_chat_ids,
         env_files,
+        caller_kind,
     })
 }
 
@@ -277,6 +290,7 @@ pub fn inject_auth_context(input: serde_json::Value, auth: &ToolAuthContext) -> 
         "caller_channel": auth.caller_channel,
         "caller_chat_id": auth.caller_chat_id,
         "control_chat_ids": auth.control_chat_ids,
+        "caller_kind": auth.caller_kind,
     });
     if !auth.env_files.is_empty() {
         auth_val["env_files"] = json!(auth.env_files);
