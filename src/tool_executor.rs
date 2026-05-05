@@ -42,6 +42,15 @@ pub struct ToolBatchContext {
     pub tool_auth: ToolAuthContext,
     pub waiting_for_user_approval: bool,
     pub waiting_approval_tool: Option<String>,
+    /// Hard execution-side allowlist. When `Some`, only tool names in this
+    /// list may be dispatched; everything else returns an error result
+    /// without touching `state.tools.execute_with_auth`. Mirrors the
+    /// per-request `tool_defs` filter in `agent_engine.rs` but at the
+    /// execution boundary, so a tool_use block emitted by the LLM that
+    /// somehow names a disallowed tool (history pattern, hallucination,
+    /// prompt injection, etc.) cannot bypass the fence.
+    /// `None` preserves the unfenced default for owner-side channels.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// Metrics counters for tool execution.
@@ -288,6 +297,37 @@ async fn execute_single_tool(
                 .to_string(),
             is_error: Some(true),
         };
+    }
+
+    // Per-request allowlist gate. The tool_defs filter in agent_engine.rs
+    // hides disallowed tools from the LLM, but doesn't stop execution if a
+    // tool_use block names a disallowed tool anyway (e.g. via session
+    // history pattern, hallucination, or prompt injection). This is the
+    // hard execution-side fence. Returns a clear error for the LLM to see
+    // so it can correct course; never touches state.tools.execute.
+    if let Some(allow) = &ctx.allowed_tools {
+        if !allow.iter().any(|n| n == name) {
+            warn!(
+                chat_id,
+                iteration,
+                tool = %name,
+                "FENCE: rejecting disallowed tool call (not in caller allowlist)"
+            );
+            ctx.failed_tools.insert(name.clone());
+            let detail = format!("{}: not_in_allowlist", name);
+            if ctx.seen_failed_tool_details.insert(detail.clone()) {
+                ctx.failed_tool_details.push(detail);
+            }
+            return ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: format!(
+                    "Tool '{}' is not available to this caller. Available tools for this session: {}.",
+                    name,
+                    allow.join(", ")
+                ),
+                is_error: Some(true),
+            };
+        }
     }
 
     // send_message consecutive call guardrail
@@ -607,6 +647,33 @@ async fn execute_wave_parallel(
         }
 
         let mut skipped = None;
+
+        // Per-request allowlist gate (parallel path). Mirrors the gate in
+        // execute_single_tool. Disallowed tools are marked as skipped with
+        // a denial result and never reach state.tools.execute_with_auth.
+        if skipped.is_none() {
+            if let Some(allow) = &ctx.allowed_tools {
+                if !allow.iter().any(|n| n == name) {
+                    warn!(
+                        chat_id,
+                        iteration,
+                        tool = %name,
+                        "FENCE: rejecting disallowed tool call in wave (not in caller allowlist)"
+                    );
+                    skipped = Some(ContentBlock::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: format!(
+                            "Tool '{}' is not available to this caller. Available tools for this session: {}.",
+                            name,
+                            allow.join(", ")
+                        ),
+                        is_error: Some(true),
+                    });
+                }
+            }
+        }
+
+        if skipped.is_none() {
         if let Ok(hook_outcome) = state
             .hooks
             .run_before_tool(chat_id, caller_channel, iteration, name, &effective_input)
@@ -633,6 +700,7 @@ async fn execute_wave_parallel(
                 }
             }
         }
+        } // end if skipped.is_none() — only run hooks when not already denied by allowlist
 
         prepared.push(PreparedCall {
             idx,

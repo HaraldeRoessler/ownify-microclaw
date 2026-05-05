@@ -1417,6 +1417,15 @@ async fn process_with_agent_logic(
                 tool_auth: tool_auth.clone(),
                 waiting_for_user_approval: false,
                 waiting_approval_tool: None,
+                // Hard execution-side allowlist — see tool_executor.rs.
+                // Mirror the per-request allowlist from the request context
+                // so the executor can reject any tool name not in this set
+                // even if the LLM emits a tool_use for it (history pattern,
+                // hallucination, prompt injection). Owner-side requests
+                // pass `None` here for full tool surface, same as before.
+                allowed_tools: context
+                    .allowed_tools
+                    .map(|a| a.iter().map(|s| (*s).to_string()).collect()),
             };
             let mut tool_metrics = crate::tool_executor::ToolMetrics {
                 tool_calls: 0,

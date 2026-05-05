@@ -28,21 +28,68 @@ const EXTERNAL_A2A_TOOLS: &[&str] = &[
     "write_memory",  // chat-scope only — non-chat scopes refused inside the tool
 ];
 
-/// Read the `x-ownify-caller-kind` header set by ownify-a2a-gateway.
-/// Currently recognises `external` only — anything else (or missing)
-/// resolves to None and the call gets the full tool surface, the
-/// historical behaviour matrix/web/scheduler relied on.
-fn allowed_tools_for_caller(headers: &HeaderMap) -> Option<&'static [&'static str]> {
+/// Memory tools are always available to external callers at the schema
+/// level — `tools/memory.rs` enforces chat-scope only inside the tool
+/// itself, so per-visitor isolation already comes for free. The Phase C
+/// strict-per-tool fence covers `invoke_tool:*`; memory wing-scoping is
+/// Component 4.
+const EXTERNAL_A2A_ALWAYS_ON: &[&str] = &["read_memory", "write_memory"];
+
+/// Build the per-call tool allowlist for an A2A inbound request.
+///
+/// Returns `None` for the historical full-trust path (no
+/// `x-ownify-caller-kind` header, or kind != external).
+///
+/// Returns `Some(Vec<String>)` for fenced external callers. The set is
+/// derived as follows:
+///   - `x-ownify-caller-grants` header **absent** → fallback to the
+///     full `EXTERNAL_A2A_TOOLS` surface (Phase B back-compat for
+///     gateway versions before Component 2 / CP fetch failures).
+///   - Header **present** → strict per-tool mode.
+///       allowed = (invoke_tool:* entries from header ∩ EXTERNAL_A2A_TOOLS)
+///                ∪ EXTERNAL_A2A_ALWAYS_ON.
+///     Capabilities outside EXTERNAL_A2A_TOOLS (e.g. admin granted
+///     `invoke_tool:sendgrid` to an external caller) are silently
+///     dropped — the runtime fence is the source of truth, not the
+///     grant table. read_memory:* entries are deferred to Component 4.
+fn allowed_tools_for_caller(headers: &HeaderMap) -> Option<Vec<String>> {
     let kind = headers
         .get("x-ownify-caller-kind")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .unwrap_or("");
-    if kind.eq_ignore_ascii_case("external") {
-        Some(EXTERNAL_A2A_TOOLS)
-    } else {
-        None
+    if !kind.eq_ignore_ascii_case("external") {
+        return None;
     }
+
+    // Header presence (not value) is the toggle between back-compat and
+    // strict mode. Absent = old gateway / CP fetch failed / fail-soft.
+    let grants_raw = headers
+        .get("x-ownify-caller-grants")
+        .and_then(|v| v.to_str().ok());
+    let Some(grants_raw) = grants_raw else {
+        // Back-compat: full external surface.
+        return Some(EXTERNAL_A2A_TOOLS.iter().map(|s| s.to_string()).collect());
+    };
+
+    // Strict mode. Parse `invoke_tool:<name>` entries; everything else
+    // (message, read_memory:*) is irrelevant to invoke_tool gating.
+    let granted: std::collections::HashSet<&str> = grants_raw
+        .split(',')
+        .map(str::trim)
+        .filter_map(|cap| cap.strip_prefix("invoke_tool:"))
+        .collect();
+
+    let mut allow: Vec<String> = EXTERNAL_A2A_TOOLS
+        .iter()
+        .filter(|name| {
+            EXTERNAL_A2A_ALWAYS_ON.contains(name) || granted.contains(*name)
+        })
+        .map(|s| s.to_string())
+        .collect();
+    // Deterministic order helps log diffs when debugging.
+    allow.sort();
+    Some(allow)
 }
 
 fn a2a_token_allowed(config: &Config, headers: &HeaderMap) -> bool {

@@ -9,4 +9,10 @@
 |----|------|---|-------|------|
 | #6840 | 8:13 PM | 🔴 | MicroClaw config saves corrupted YAML by bypassing yaml_edit library | ~605 |
 | #6839 | 8:10 PM | 🔴 | MicroClaw config persistence fixed to prevent malformed YAML crashloops | ~654 |
+
+### May 4, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #8431 | 6:04 PM | 🟣 | Web API now honors allowed_tools restrictions from request body | ~280 |
 </claude-mem-context>

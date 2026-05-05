@@ -766,9 +766,13 @@ struct SendRequest {
     /// JSON — set internally by the A2A inbound path when the
     /// `x-ownify-caller-kind: external` header is present so external
     /// callers see only a fenced tool surface. Owner-side web POSTs
-    /// leave this None (full tool access).
+    /// leave this None (full tool access). Owned `Vec<String>` because
+    /// Phase C builds this dynamically by intersecting the caller's
+    /// granted capabilities (from `x-ownify-caller-grants`) with the
+    /// hardcoded EXTERNAL_A2A_TOOLS — so the contents aren't known at
+    /// compile time.
     #[serde(skip_deserializing, default)]
-    allowed_tools: Option<&'static [&'static str]>,
+    allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1796,11 +1800,19 @@ async fn send_and_store_response_with_events(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // body.allowed_tools is owned (Option<Vec<String>>); AgentRequestContext
+    // takes a borrowed slice. Stage a Vec<&str> here so the references in
+    // request_ctx tie to a value with a stable lifetime that outlives the
+    // agent call below.
+    let allowed_refs: Option<Vec<&str>> = body
+        .allowed_tools
+        .as_ref()
+        .map(|v| v.iter().map(String::as_str).collect());
     let request_ctx = AgentRequestContext {
         caller_channel: "web",
         chat_id,
         chat_type: "web",
-        allowed_tools: body.allowed_tools,
+        allowed_tools: allowed_refs.as_deref(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let saw_send_message_tool = Arc::new(AtomicBool::new(false));
