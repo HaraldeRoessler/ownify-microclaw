@@ -28,6 +28,20 @@ use microclaw_core::llm_types::{
 /// Remove invalid `ToolResult` blocks that cannot be matched to the most recent
 /// assistant `ToolUse` turn. This can happen after session compaction or
 /// malformed history reconstruction.
+/// Strip cluster-internal hostnames from user-visible error messages.
+/// Internal URLs like `http://ownify-router-...svc.cluster.local:4000/...`
+/// leak infrastructure details to chat users with no debugging value to
+/// them — the chat user can't reach the URL and shouldn't see it. For
+/// public/BYO URLs we keep the URL since that IS useful debug info
+/// (e.g. when the BYO endpoint at openrouter.ai or ollama.com errors).
+fn sanitize_user_facing_url(url: &str) -> String {
+    if url.contains(".svc.cluster.local") {
+        "ownify-router".to_string()
+    } else {
+        url.to_string()
+    }
+}
+
 fn sanitize_messages(messages: Vec<Message>) -> Vec<Message> {
     let mut pending_tool_ids: HashSet<String> = HashSet::new();
     let mut sanitized = Vec::new();
@@ -1614,12 +1628,12 @@ impl LlmProvider for OpenAiProvider {
             if let Ok(err) = serde_json::from_str::<OaiErrorResponse>(&text) {
                 return Err(MicroClawError::LlmApi(format!(
                     "{} (url={})",
-                    err.error.display(), self.chat_url
+                    err.error.display(), sanitize_user_facing_url(&self.chat_url)
                 )));
             }
             return Err(MicroClawError::LlmApi(format!(
                 "HTTP {status} {}: {text}",
-                self.chat_url
+                sanitize_user_facing_url(&self.chat_url)
             )));
         }
     }
@@ -1755,12 +1769,12 @@ impl LlmProvider for OpenAiProvider {
             if let Ok(err) = serde_json::from_str::<OaiErrorResponse>(&text) {
                 return Err(MicroClawError::LlmApi(format!(
                     "{} (url={})",
-                    err.error.display(), self.chat_url
+                    err.error.display(), sanitize_user_facing_url(&self.chat_url)
                 )));
             }
             return Err(MicroClawError::LlmApi(format!(
                 "HTTP {status} {}: {text}",
-                self.chat_url
+                sanitize_user_facing_url(&self.chat_url)
             )));
         };
 
