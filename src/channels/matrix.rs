@@ -529,6 +529,12 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                                     prefer_sdk_send: false,
                                     event_time_ms,
                                     image_data,
+                                    // Non-SDK HTTP sync path doesn't
+                                    // decrypt non-image attachments;
+                                    // SDK-handler events (the encrypted
+                                    // DM path most users hit) populate
+                                    // this from download_media_for_attachment.
+                                    file_attachment: None,
                                 };
                                 handle_matrix_message(state, runtime_ctx, msg).await;
                             }
@@ -880,6 +886,33 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
                 None
             };
 
+            // m.file / m.audio / m.video — download bytes and stash them
+            // so handle_matrix_message can save them to the chat workspace
+            // (where bash / read_file / pptx skill can pick them up). Same
+            // matrix-sdk get_file path as m.image — handles encrypted
+            // attachments transparently.
+            let file_attachment: Option<MatrixFileAttachment> = match &ev.content.msgtype {
+                MessageType::File(fc) => download_media_for_attachment(
+                    &room.client(),
+                    fc,
+                    fc.body.as_str(),
+                    fc.info.as_ref().and_then(|i| i.mimetype.clone()),
+                ).await,
+                MessageType::Audio(ac) => download_media_for_attachment(
+                    &room.client(),
+                    ac,
+                    ac.body.as_str(),
+                    ac.info.as_ref().and_then(|i| i.mimetype.clone()),
+                ).await,
+                MessageType::Video(vc) => download_media_for_attachment(
+                    &room.client(),
+                    vc,
+                    vc.body.as_str(),
+                    vc.info.as_ref().and_then(|i| i.mimetype.clone()),
+                ).await,
+                _ => None,
+            };
+
             let msg = MatrixIncomingMessage {
                 room_id,
                 is_direct,
@@ -890,6 +923,7 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
                 prefer_sdk_send: true,
                 event_time_ms: None,
                 image_data,
+                file_attachment,
             };
             handle_matrix_message(app_state, runtime, msg).await;
         }
@@ -1832,6 +1866,69 @@ struct MatrixIncomingMessage {
     /// agent engine as vision input so the LLM can actually see the
     /// pixels instead of just the filename.
     image_data: Option<(String, String)>,
+    /// For `m.file` / `m.audio` / `m.video` events. Bytes are saved
+    /// into the chat workspace so that bash / read_file / file-format
+    /// skills (pptx, xlsx, pdf, docx) can operate on the actual file
+    /// rather than the text-only `[attachment:m.file] filename` body.
+    file_attachment: Option<MatrixFileAttachment>,
+}
+
+struct MatrixFileAttachment {
+    bytes: Vec<u8>,
+    filename: String,
+    mime: Option<String>,
+}
+
+/// Generic helper for `m.file` / `m.audio` / `m.video` events. Same
+/// matrix-sdk get_file flow as the m.image branch — the SDK transparently
+/// handles encrypted attachments. Returns None on any failure so the
+/// agent at least gets the text-summary body.
+async fn download_media_for_attachment<C>(
+    client: &matrix_sdk::Client,
+    content: &C,
+    body_filename: &str,
+    mime: Option<String>,
+) -> Option<MatrixFileAttachment>
+where
+    C: matrix_sdk::media::MediaEventContent,
+{
+    match client.media().get_file(content, true).await {
+        Ok(Some(bytes)) => Some(MatrixFileAttachment {
+            bytes,
+            filename: sanitize_attachment_filename(body_filename),
+            mime,
+        }),
+        Ok(None) => {
+            warn!("Matrix file event had no downloadable media source");
+            None
+        }
+        Err(e) => {
+            warn!("Matrix file download failed: {e}");
+            None
+        }
+    }
+}
+
+/// Strip path separators and reserved characters so a user-supplied
+/// filename can't escape the chat workspace. Falls back to a default
+/// when the input is empty or fully sanitised away.
+fn sanitize_attachment_filename(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return "attachment.bin".to_string();
+    }
+    // Keep only the basename component the user picked; drop any path
+    // separators (forward, backward, or NULs) the client might have
+    // included. Refuse leading dots so the file is plainly visible.
+    let cleaned: String = trimmed
+        .replace(['/', '\\', '\0'], "_")
+        .trim_start_matches('.')
+        .to_string();
+    if cleaned.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        cleaned
+    }
 }
 
 struct MatrixIncomingReaction {
@@ -2251,7 +2348,7 @@ async fn send_matrix_streaming_response(
 async fn handle_matrix_message(
     app_state: Arc<AppState>,
     runtime: MatrixRuntimeContext,
-    msg: MatrixIncomingMessage,
+    mut msg: MatrixIncomingMessage,
 ) {
     let chat_id =
         resolve_matrix_chat_id(app_state.clone(), &runtime, &msg.room_id, msg.is_direct).await;
@@ -2259,6 +2356,57 @@ async fn handle_matrix_message(
     if chat_id == 0 {
         error!("Matrix: failed to resolve chat ID for room {}", msg.room_id);
         return;
+    }
+
+    // If the user attached a non-image file (m.file/audio/video), save
+    // its bytes into `<working_dir>/chat/matrix/<chat_id>/attachments/`
+    // so that bash, read_file, and file-format skills (pptx, xlsx, pdf,
+    // docx) can read the real file. Append a hint to the body so the
+    // agent learns the file path. Best-effort: write failures fall back
+    // to the original "[attachment:m.file] filename" body.
+    if let Some(att) = msg.file_attachment.take() {
+        let base = std::path::PathBuf::from(&app_state.config.working_dir);
+        let dir = base
+            .join("chat")
+            .join("matrix")
+            .join(chat_id.to_string())
+            .join("attachments");
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => {
+                let path = dir.join(&att.filename);
+                match std::fs::write(&path, &att.bytes) {
+                    Ok(()) => {
+                        let rel = format!("attachments/{}", att.filename);
+                        let mime = att.mime.as_deref().unwrap_or("application/octet-stream");
+                        msg.body = format!(
+                            "{}\n\n[file saved to: {} ({} bytes, mime: {})]",
+                            msg.body,
+                            rel,
+                            att.bytes.len(),
+                            mime
+                        );
+                        info!(
+                            "Matrix attachment saved: chat_id={} path={} bytes={}",
+                            chat_id,
+                            path.display(),
+                            att.bytes.len()
+                        );
+                    }
+                    Err(e) => warn!(
+                        "Matrix attachment write failed: chat_id={} path={} err={}",
+                        chat_id,
+                        path.display(),
+                        e
+                    ),
+                }
+            }
+            Err(e) => warn!(
+                "Matrix attachment dir create failed: chat_id={} dir={} err={}",
+                chat_id,
+                dir.display(),
+                e
+            ),
+        }
     }
 
     let inbound_event_id = if msg.event_id.trim().is_empty() {
