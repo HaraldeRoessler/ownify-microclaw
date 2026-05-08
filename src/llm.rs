@@ -863,6 +863,33 @@ fn combine_visible_and_reasoning_text(visible: &str, reasoning: &str) -> String 
     format!("<thought>\n{}\n</thought>\n\n{}", reasoning, visible)
 }
 
+/// Inverse of `combine_visible_and_reasoning_text`. Splits a stored
+/// assistant message text back into (thought, visible). Used when
+/// translating the conversation history back into an OpenAI-style
+/// request body so that providers expecting `reasoning_content` (e.g.
+/// DeepSeek) get it in the right field instead of mixed into `content`.
+/// If no `<thought>` block is present, returns ("", text).
+fn split_thought_and_visible(text: &str) -> (String, String) {
+    let opener = "<thought>";
+    let closer = "</thought>";
+    let Some(start) = text.find(opener) else {
+        return (String::new(), text.to_string());
+    };
+    let Some(end_rel) = text[start + opener.len()..].find(closer) else {
+        return (String::new(), text.to_string());
+    };
+    let inner_start = start + opener.len();
+    let inner_end = inner_start + end_rel;
+    let after_close = inner_end + closer.len();
+    let thought = text[inner_start..inner_end].trim().to_string();
+    let before = &text[..start];
+    let after = &text[after_close..];
+    let visible = format!("{}{}", before.trim_end(), after.trim_start())
+        .trim()
+        .to_string();
+    (thought, visible)
+}
+
 fn combine_response_text_for_display(
     visible: &str,
     reasoning: &str,
@@ -1091,10 +1118,19 @@ impl OpenAiProvider {
         let is_openai_codex = is_openai_codex_provider(&config.llm_provider);
         let is_deepseek_provider = config.llm_provider.eq_ignore_ascii_case("deepseek");
         let is_google_provider = config.llm_provider.eq_ignore_ascii_case("google");
-        let enable_reasoning_content_bridge = is_deepseek_provider || is_google_provider;
+        let configured_base = config.llm_base_url.as_deref().unwrap_or("");
+        // When microclaw runs as a tenant agent, its `llm_base_url` points
+        // at the per-tenant ownify-router (`http://ownify-router-*.svc...`).
+        // The router can pick any model from the tenant's BYO config —
+        // including DeepSeek served via OpenRouter, which requires
+        // `reasoning_content` round-trip on history. Microclaw never sees
+        // the picked model name, so we enable the reasoning bridge
+        // defensively for any ownify-router endpoint.
+        let is_ownify_router = configured_base.contains("ownify-router");
+        let enable_reasoning_content_bridge =
+            is_deepseek_provider || is_google_provider || is_ownify_router;
         let enable_thinking_param =
             (is_deepseek_provider || is_google_provider) && config.show_thinking;
-        let configured_base = config.llm_base_url.as_deref().unwrap_or("");
         let base = resolve_openai_compat_base(&config.llm_provider, configured_base);
 
         let (api_key, codex_account_id) = if is_openai_codex {
@@ -2081,8 +2117,27 @@ fn translate_messages_to_oai_with_reasoning(
 
                     let mut m = json!({"role": "assistant"});
                     if include_reasoning_for_tool_calls && !tool_calls.is_empty() {
-                        m["reasoning_content"] = json!(text);
-                        m["content"] = serde_json::Value::Null;
+                        // Round-trip <thought>...</thought> wrappers into the
+                        // `reasoning_content` field (where DeepSeek expects
+                        // them) while keeping the visible answer in `content`.
+                        // Previous behaviour dumped the whole text into
+                        // reasoning_content and lost the visible answer on
+                        // replay — observed 2026-05-08 with deepseek-v4-pro
+                        // via OpenRouter through ownify-router.
+                        let (thought, visible) = split_thought_and_visible(&text);
+                        if !thought.is_empty() {
+                            m["reasoning_content"] = json!(thought);
+                        }
+                        if !visible.is_empty() {
+                            m["content"] = json!(visible);
+                        } else if thought.is_empty() {
+                            // No thought, no visible — keep original text so
+                            // we don't accidentally produce empty assistant
+                            // content (some providers reject that).
+                            m["content"] = json!(text);
+                        } else {
+                            m["content"] = serde_json::Value::Null;
+                        }
                     } else if !text.is_empty() || tool_calls.is_empty() {
                         m["content"] = json!(text);
                     }
