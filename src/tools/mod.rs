@@ -9,6 +9,7 @@ pub mod grep;
 pub mod knowledge_graph;
 pub mod mcp;
 pub mod memory;
+pub mod pptx_edit;
 pub mod read_file;
 pub mod schedule;
 pub mod send_message;
@@ -164,6 +165,7 @@ impl ToolRegistry {
             Box::new(time_math::GetCurrentTimeTool::new(config.timezone.clone())),
             Box::new(time_math::CompareTimeTool::new(config.timezone.clone())),
             Box::new(time_math::CalculateTool::new()),
+            Box::new(pptx_edit::PptxEditTool::new()),
             Box::new(send_message::SendMessageTool::new(
                 channel_registry.clone(),
                 db.clone(),
@@ -354,6 +356,7 @@ impl ToolRegistry {
             Box::new(time_math::GetCurrentTimeTool::new(config.timezone.clone())),
             Box::new(time_math::CompareTimeTool::new(config.timezone.clone())),
             Box::new(time_math::CalculateTool::new()),
+            Box::new(pptx_edit::PptxEditTool::new()),
             Box::new(activate_skill::ActivateSkillTool::new_with_runtime(
                 &skills_data_dir,
                 &config.data_dir,
