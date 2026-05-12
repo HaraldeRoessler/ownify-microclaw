@@ -8,8 +8,8 @@
     "dev": "vite"
   },
   "dependencies": {
-    "@assistant-ui/react": "^0.12.28",
-    "@assistant-ui/react-markdown": "^0.12.11",
+    "@assistant-ui/react": "^0.14.0",
+    "@assistant-ui/react-markdown": "^0.14.0",
     "@assistant-ui/react-ui": "^0.2.1",
     "@radix-ui/themes": "^3.2.1",
     "class-variance-authority": "^0.7.1",
@@ -29,6 +29,6 @@
     "@vitejs/plugin-react": "^6.0.1",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.6.3",
-    "vite": "^8.0.10"
+    "vite": "^8.0.11"
   }
 }
