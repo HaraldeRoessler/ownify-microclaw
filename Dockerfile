@@ -103,7 +103,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     notion-client
 
 # docx-js for the docx skill (creating new .docx files via Node)
-RUN npm install -g --omit=dev docx
+# marp for pptx skill (Markdown → .pptx, preferred over python-pptx for new decks)
+RUN npm install -g --omit=dev docx @marp-team/marp-cli
 
 # Lets `node -e "require('docx')"` resolve global installs at runtime
 ENV NODE_PATH=/usr/local/lib/node_modules

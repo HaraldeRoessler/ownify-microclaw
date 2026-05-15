@@ -8,13 +8,154 @@ license: MIT (see repository LICENSE)
 
 Tools in the runtime:
 
-- `python-pptx` — pythonic read/write of .pptx, slide layouts, speaker notes
-- `soffice` (LibreOffice headless) — convert to/from other formats, render thumbnails
-- `pdftoppm` (poppler) — rasterise slides via PDF intermediate
+- **`marp`** (Node) — convert Markdown to .pptx with built-in themes. **Preferred for creating new presentations.**
+- `python-pptx` — pythonic read/write of .pptx, slide layouts, speaker notes. **Use for editing/updating existing decks** (template fills, text replacements, speaker notes).
+- `soffice` (LibreOffice headless) — convert to/from other formats, render thumbnails.
+- `pdftoppm` (poppler) — rasterise slides via PDF intermediate.
 
-Use `python-pptx` for everything content-related. Reach for `soffice` only to go to/from .pptx and other formats, or to generate slide thumbnails.
+**Decision rule:**
+- User says "create a presentation" or "make a slide deck" → **use Marp** (Markdown → pptx)
+- User says "edit this slide" or "update the template" or "add notes" → **use python-pptx** (programmatic manipulation)
 
-## Read / extract
+---
+
+## Create a deck — Marp (Markdown → pptx)
+
+Write a Markdown file with Marp front-matter, then convert with `marp`.
+
+### Basic structure
+
+```markdown
+---
+marp: true
+theme: uncover
+---
+
+# Main Title
+## Subtitle · Date
+
+---
+
+# Slide Title
+
+- Bullet point one
+- Bullet point two
+- **Bold** and *italic* text
+
+---
+
+![bg left:40%](image.png)
+
+# Split Layout
+
+Content on the right side of the slide.
+```
+
+### Then convert
+
+```bash
+marp slides.md -o out.pptx
+```
+
+### Themes
+
+| Theme    | Style               | Best for                    |
+|----------|---------------------|-----------------------------|
+| `uncover`| Clean, modern       | Default — professional      |
+| `gaia`   | Bold, colorful      | Creative / pitch decks      |
+| `default`| Minimal             | Internal / drafts           |
+
+Set in front-matter: `theme: gaia`
+
+### Slide features (Markdown → pptx)
+
+| Feature | Syntax |
+|---------|--------|
+| Background image | `![bg](bg.png)` or `![bg right:40%](chart.png)` |
+| Background color | `<!-- backgroundColor: #e0f0ff -->` |
+| Split columns | `![bg left:50%](img.png)` in same slide as content |
+| Tables | Standard Markdown tables |
+| Code blocks | ` ```python` with optional filename ` ```python title="script.py"` |
+| Lists | Standard Markdown bullets and numbered lists |
+| Images | `![Caption](file.png)` — path relative to the .md file |
+| Multi-column text | Not native — use table layout instead |
+| Speaker notes | `<!-- _footer: "speaker note here" -->` |
+| Slide numbers | Set in front-matter: `paginate: true` |
+| Header/footer | `header: "Section title"` and `footer: "Confidential"` in front-matter |
+
+### Example: full deck with multiple features
+
+```markdown
+---
+marp: true
+theme: uncover
+paginate: true
+header: "Q1 Review · Confidential"
+---
+
+# Quarterly Review
+## Harald Roessler · 2026-05-15
+
+---
+
+# Agenda
+
+1. Executive summary
+2. Financial highlights
+3. Product roadmap
+4. Q&A
+
+---
+
+# Revenue Overview
+
+| Region    | Q1 2025 | Q1 2026 | Change |
+|-----------|---------|---------|--------|
+| EMEA      | €3.8M   | €4.2M   | +11%   |
+| APAC      | €2.1M   | €2.8M   | +33%   |
+| North Am. | €4.7M   | €5.1M   | +9%    |
+
+---
+
+![bg right:45%](growth-chart.png)
+
+# Key Drivers
+
+- **EMEA**: New enterprise deals closed in DE/FR
+- **APAC**: Partner channel expansion in Singapore
+- **NA**: Renewal rates stable at 94 %
+
+---
+
+# Product Roadmap
+
+| Quarter | Milestone |
+|---------|-----------|
+| Q2 2026 | v3.0 release · AI search GA |
+| Q3 2026 | Mobile apps (iOS + Android) |
+| Q4 2026 | Enterprise SSO + audit |
+
+---
+
+# Thank You
+
+## Questions?
+
+Contact: harald.roessler@example.com
+```
+
+### Images in Marp
+
+Images must exist as files in the working directory before `marp` runs. Copy or download them first:
+
+```bash
+cp /some/path/chart.png ./
+marp slides.md -o out.pptx
+```
+
+---
+
+## Read / extract content from existing pptx
 
 ```python
 from pptx import Presentation
@@ -30,38 +171,9 @@ for i, slide in enumerate(prs.slides, 1):
         print("NOTES:", slide.notes_slide.notes_text_frame.text)
 ```
 
-## Create a deck
+---
 
-```python
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor
-
-prs = Presentation()                     # default 13.33" x 7.5" (16:9)
-
-# title slide
-slide = prs.slides.add_slide(prs.slide_layouts[0])
-slide.shapes.title.text = "Quarterly review"
-slide.placeholders[1].text = "Harald Roessler · 2026-04-23"
-
-# content slide
-slide = prs.slides.add_slide(prs.slide_layouts[1])
-slide.shapes.title.text = "Headline numbers"
-tf = slide.placeholders[1].text_frame
-tf.text = "Revenue up 11%"
-for point in ["EMEA led growth (+8%)", "APAC accelerating (+14%)", "Churn stable"]:
-    p = tf.add_paragraph()
-    p.text = point
-    p.font.size = Pt(18)
-
-# picture slide
-slide = prs.slides.add_slide(prs.slide_layouts[6])   # blank
-slide.shapes.add_picture("chart.png", Inches(1), Inches(1.5), width=Inches(8))
-
-prs.save("out.pptx")
-```
-
-## Edit an existing deck
+## Edit an existing deck (template fill, text replace)
 
 ```python
 from pptx import Presentation
@@ -77,6 +189,8 @@ prs.save("out.pptx")
 
 Run-level replacement preserves font, weight, colour. Paragraph-level `text = ` assignment discards all inline formatting.
 
+---
+
 ## Speaker notes
 
 ```python
@@ -88,22 +202,7 @@ for slide in prs.slides:
 prs.save("out.pptx")
 ```
 
-## Tables and charts
-
-Tables:
-
-```python
-from pptx.util import Inches
-slide = prs.slides.add_slide(prs.slide_layouts[5])
-rows, cols = 3, 3
-table = slide.shapes.add_table(rows, cols, Inches(1), Inches(2), Inches(8), Inches(2)).table
-for j, h in enumerate(["Region", "Revenue", "Growth"]):
-    table.cell(0, j).text = h
-for i, (r, v, g) in enumerate([("EMEA", "€1.2M", "+8%"), ("APAC", "€0.9M", "+14%")], start=1):
-    table.cell(i, 0).text, table.cell(i, 1).text, table.cell(i, 2).text = r, v, g
-```
-
-Charts are verbose through python-pptx; a pragmatic workflow for anything beyond a simple bar is to render the chart in matplotlib as a PNG and insert it with `add_picture`.
+---
 
 ## Convert / thumbnail
 
@@ -114,9 +213,12 @@ pdftoppm -jpeg -r 120 in.pdf thumb                    # → thumb-1.jpg, thumb-2
 
 Round-trip through PDF then raster is more robust than trying to render slides directly — LibreOffice handles the deck layout, poppler handles the imaging.
 
+---
+
 ## Rules of thumb
 
-- Start from the right layout: `prs.slide_layouts[0]` is title, `[1]` is title+content, `[5]` is title-only, `[6]` is blank. Inspect `prs.slide_layouts[i].name` on an unfamiliar template.
-- Templates (corporate master decks) override most defaults — when the user supplies one, load it as the starting `Presentation(template.pptx)` rather than `Presentation()`.
+- **New presentations → Marp.** Faster, more reliable, the LLM writes Markdown not buggy Python.
+- **Editing existing decks → python-pptx.** Marp cannot round-trip existing .pptx files — always use python-pptx for modifications.
+- Templates (corporate master decks) override most defaults — when the user supplies one, load it as `Presentation(template.pptx)`.
 - Fonts must exist on the system where the deck is *rendered*, not where it's *built*. LibreOffice in this image has `fonts-liberation`; for brand fonts the user wants, they must provide the .ttf files at render time.
-- Images: always provide a local path; `add_picture` reads the file when called.
+- Images in Marp: always provide a local path. Copy the file to the working directory before running `marp`.
