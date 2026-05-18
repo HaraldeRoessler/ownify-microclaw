@@ -5,9 +5,8 @@
 //! pattern matching and decides allow / redact / refuse / alert.
 //!
 //! Configuration (env, read at boot):
-//!   OWNIFY_EGRESS_SCAN_URL   — base URL (e.g.
-//!                              http://ownify-egress-scanner-<slug>.ownify-tenant-<slug>.svc.cluster.local:4500)
-//!                              unset → no filter installed (transparent).
+//!   OWNIFY_EGRESS_SCAN_URL   — base URL of the cluster-side egress scanning
+//!                              service. Unset → no filter installed.
 //!   OWNIFY_EGRESS_SCAN_TOKEN — optional Bearer presented to /scan.
 //!   OWNIFY_TENANT_SLUG       — tenant slug, recorded in audit rows.
 //!   OWNIFY_EGRESS_FAIL_OPEN  — "1" / "true" → allow on scanner outage.

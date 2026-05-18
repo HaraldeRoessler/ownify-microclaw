@@ -215,7 +215,7 @@ pub struct ToolAuthContext {
     /// Identity classification of the caller.
     /// "internal" (default) = the agent's own owner / a peer ownify
     /// tenant — historical full-trust path.
-    /// "external" = a non-tenant identity (e.g. dsncon-web signing as
+    /// "external" = a non-tenant identity (e.g. an external site signing as
     /// its own DID). Tools that expose tenant-shared state should
     /// fence non-chat scopes when this is "external".
     pub caller_kind: String,

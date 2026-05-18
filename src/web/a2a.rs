@@ -11,7 +11,7 @@ use crate::a2a::{
 /// visitor. The memory tools self-fence the global + bot scopes for
 /// external callers (see ReadMemoryTool/WriteMemoryTool::execute);
 /// chat scope is per-session_key (= per-visitor cookie when called
-/// via dsncon's signed widget) so visitor A's writes never leak to
+/// via the external caller's signed widget) so visitor A's writes never leak to
 /// visitor B's reads.
 ///
 /// Excluded by construction: bash, file I/O, peer a2a_send, the
