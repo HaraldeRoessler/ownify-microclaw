@@ -16,6 +16,7 @@ fn test_auth_context_control_chat() {
         caller_chat_id: 100,
         control_chat_ids: vec![100, 200],
         env_files: vec![],
+        caller_kind: "internal".to_string(),
     };
     assert!(auth.is_control_chat());
     assert!(auth.can_access_chat(999)); // control can access any chat
@@ -28,6 +29,7 @@ fn test_auth_context_regular_chat() {
         caller_chat_id: 300,
         control_chat_ids: vec![100, 200],
         env_files: vec![],
+        caller_kind: "internal".to_string(),
     };
     assert!(!auth.is_control_chat());
     assert!(auth.can_access_chat(300)); // can access own chat
@@ -41,6 +43,7 @@ fn test_auth_context_empty_control_list() {
         caller_chat_id: 100,
         control_chat_ids: vec![],
         env_files: vec![],
+        caller_kind: "internal".to_string(),
     };
     assert!(!auth.is_control_chat());
     assert!(auth.can_access_chat(100)); // can access own
