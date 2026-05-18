@@ -3,7 +3,7 @@
 ## Quick start
 
 ```sh
-git clone https://github.com/ownify/ownify-microclaw.git
+git clone https://github.com/HaraldeRoessler/ownify-microclaw.git
 cd ownify-microclaw
 cp microclaw.config.example.yaml microclaw.config.yaml
 cargo run -- start

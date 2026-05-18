@@ -32,7 +32,7 @@ This fork extends upstream [MicroClaw](https://microclaw.ai) (MIT license) with 
 ## Quick start (local development)
 
 ```sh
-git clone https://github.com/ownify/ownify-microclaw.git
+git clone https://github.com/HaraldeRoessler/ownify-microclaw.git
 cd ownify-microclaw
 cargo build --release --features channel-matrix
 ./target/release/microclaw setup
@@ -58,8 +58,8 @@ Deployment is managed by the ownify control plane. See [ownify.ai](https://ownif
 ## Docker
 
 ```sh
-docker pull ghcr.io/ownify/ownify-microclaw:latest
-docker run --rm -it -p 127.0.0.1:10961:10961 ghcr.io/ownify/ownify-microclaw:latest
+docker pull ghcr.io/haralderoessler/ownify-microclaw:latest
+docker run --rm -it -p 127.0.0.1:10961:10961 ghcr.io/haralderoessler/ownify-microclaw:latest
 ```
 
 Persist config and data:
@@ -74,7 +74,7 @@ docker run --rm -it \
   -v "$(pwd)/microclaw.config.yaml:/app/microclaw.config.yaml:ro" \
   -v "$(pwd)/data:/home/microclaw/.microclaw" \
   -v "$(pwd)/tmp:/app/tmp" \
-  ghcr.io/ownify/ownify-microclaw:latest
+  ghcr.io/haralderoessler/ownify-microclaw:latest
 ```
 
 ## Architecture
