@@ -1,35 +1,136 @@
 # ownify MicroClaw
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-upstream%20microclaw-blue)](https://microclaw.ai)
+[![Docker](https://img.shields.io/badge/ghcr-haralderoessler%2Fownify--microclaw-blue)](https://github.com/HaraldeRoessler/ownify-microclaw/pkgs/container/ownify-microclaw)
 
-Agent runtime for [ownify](https://ownify.ai) — a multi-tenant Kubernetes platform for running AI agents at scale. This is a production fork of [MicroClaw](https://microclaw.ai) (MIT), extended and hardened for the ownify control plane.
+## About
 
-## What it does
+**ownify** is a self-hosted, multi-tenant Kubernetes platform for running AI agents at scale. Born from the belief that powerful agent infrastructure should be open-source, transparent, and under your control. No vendor lock-in, no hidden pricing tiers — just production-grade agent hosting you own end-to-end.
 
-Every ownify tenant agent runs on this runtime. It provides:
+ownify MicroClaw is the agent runtime that powers every ownify tenant. Built on [MicroClaw](https://microclaw.ai) — the leading Rust multi-channel agent runtime (MIT) — it extends the upstream with enterprise-grade isolation, intelligent routing, durable memory, agent-to-agent mesh networking, and data-loss prevention. The result is a battle-tested stack that runs thousands of agents across Telegram, Discord, Slack, Matrix, and the Web, each in their own sandboxed environment with full tool and memory access.
 
-- **Channel-agnostic agent loop** — same runtime, tools, and memory across Telegram, Discord, Slack, Matrix, and Web
-- **LLM routing** — per-request classification and multi-provider routing via ownify-router
-- **Persistent memory** — semantic search, knowledge graph, and automatic context compaction via ownify-memgate
-- **Agent-to-agent (A2A)** — Ed25519-signed AAE envelopes, MolTrust reputation scoring, per-caller capability ACLs
-- **Tool ecosystem** — built-in skills for documents, email, social media, web, and autonomous coding
-- **Scheduled tasks** — cron-based recurring work and one-shot automation
-- **Enterprise isolation** — per-tenant pods for microclaw, memory, routing, and egress scanning
+### Key principles
 
-## Relationship to upstream
+- **Multi-tenant by design** — every agent runs in dedicated Kubernetes pods with no shared state
+- **Provider-agnostic** — Anthropic and OpenAI-compatible, routed per-request by intent classification
+- **Memory-first** — semantic search, knowledge graph, automatic compaction — agents never forget
+- **Secure from day one** — AAE-signed inter-agent envelopes, per-caller ACLs, egress DLP scanning
+- **Self-hosted, open-source** — deploy on your own infrastructure with full observability
 
-This fork extends upstream [MicroClaw](https://microclaw.ai) (MIT license) with ownify-platform components:
+## Platform architecture
 
-| Component | Purpose |
-|---|---|
-| ownify-router | Per-tenant LLM request classification + multi-provider routing |
-| ownify-memgate | Persistent agent memory with semantic search + knowledge graph |
-| ownify-a2a-gateway | Agent-to-agent protocol with AAE envelope auth + per-caller ACL |
-| ownify-egress-scanner | Outbound data-loss prevention (DLP) |
-| ownify-control-plane | Per-tenant pod management, peer registry, signing key lifecycle |
+```mermaid
+graph TB
+    subgraph "Tenant Namespace"
+        MC["microclaw<br/>Agent Runtime"]
+        R["ownify-router<br/>LLM Classifier + Proxy"]
+        M["ownify-memgate<br/>Vector Memory + KG"]
+        G["ownify-a2a-gateway<br/>Inter-Agent Mesh"]
+        S["ownify-egress-scanner<br/>DLP Audit"]
+    end
 
-## Quick start (local development)
+    subgraph "Control Plane"
+        CP["ownify-control-plane<br/>Peer Registry · Key Lifecycle<br/>Tenant Provisioning"]
+    end
+
+    subgraph "External"
+        USR["Users<br/>TG / Discord / Slack / Web"]
+        LLM["LLM Providers<br/>Anthropic · OpenAI · Ollama"]
+        PEER["Peer Agents<br/>Other Tenants"]
+    end
+
+    USR --> MC
+    MC --> R
+    R --> LLM
+    MC --> M
+    MC --> S
+    MC <--> G
+    G <--> PEER
+    CP -.-> MC & R & M & G & S
+```
+
+## Request lifecycle
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant MC as microclaw
+    participant R as ownify-router
+    participant M as ownify-memgate
+    participant LLM as LLM Provider
+    participant T as Tools/Skills
+
+    U->>MC: message (chat channel)
+    MC->>M: load session + memory context
+    M-->>MC: session state + relevant memories
+    MC->>R: forward request
+    R->>R: classify intent (code/reasoning/fact/chat/vision)
+    R->>LLM: route to optimal model
+    LLM-->>R: response or tool_call
+    R-->>MC: response or tool_call
+    alt tool call
+        MC->>T: execute tool
+        T-->>MC: result
+        MC->>R: continue loop with result
+    else final response
+        MC->>M: persist session + update memory
+        MC->>U: send response
+    end
+```
+
+## Repository structure
+
+```
+ownify-microclaw/
+    microclaw.config.example.yaml  # Reference config
+    Dockerfile                     # Multi-stage Rust + Node build
+    crates/                        # Modular Rust crates
+        microclaw-core/            #   Shared error/types/text
+        microclaw-storage/         #   SQLite DB + memory + usage
+        microclaw-tools/           #   Tool primitives + sandbox
+        microclaw-channels/        #   Channel abstraction layer
+        microclaw-app/             #   Logging, skills, transcribe
+    src/                           # Binary source
+        main.rs                    #   CLI entry (start, setup, acp)
+        runtime.rs                 #   AppState wiring, channel boot
+        agent_engine.rs            #   Channel-agnostic agent loop
+        llm.rs                     #   Provider abstraction layer
+        web.rs                     #   Web API + stream endpoints
+        scheduler.rs               #   Cron scheduler + reflector
+        channels/                  #   Telegram, Discord, Slack, Feishu, IRC
+        tools/                     #   Bash, files, web, memory, sub-agents
+        hooks.rs                   #   Before/after LLM/tool hook runtime
+        egress_scan.rs             #   ownify DLP client
+    skills/                        # Built-in agent skills
+        built-in/
+            ownify-memory-enhanced/  # Memory protocol
+            a2a-self-log/            # A2A interaction logging
+            autonomous-coder/        # Autonomous coding workflow
+            docx/ pdf/ pptx/ xlsx/   # Document skills (Marp for pptx)
+            github/ sendgrid/ imap-mail/
+    docs/                          # Operations, releases, RFCs
+    web/                           # React web UI (embedded in binary)
+    hooks/                         # Sample hooks
+    scripts/                       # CI helpers, OVH build script
+```
+
+## How it extends upstream
+
+This fork adds production-hardened ownify platform integration to upstream MicroClaw (MIT):
+
+| Component | Location | Purpose |
+|---|---|---|
+| **DLP egress scanner** | `src/egress_scan.rs` | Outbound data-loss prevention — scans every tool output before delivery. Fail-closed by default. |
+| **URL sanitizer** | `src/llm.rs` | Strips internal cluster DNS names from user-facing error messages |
+| **A2A inbound fencing** | `src/agent_engine.rs` | External A2A callers restricted to narrow tool allowlist with per-caller capability ACLs |
+| **A2A gateway integration** | `src/web/a2a.rs` | Ed25519-signed AAE envelopes, MolTrust reputation, cross-peer replay defence |
+| **ownify memory protocol** | `skills/built-in/ownify-memory-enhanced/` | Structured memory with semantic search, knowledge graph, typed storage shortcuts |
+| **A2A self-logging** | `skills/built-in/a2a-self-log/` | Diary-based interaction logging so agents remember peer contacts |
+| **Marp pptx** | `skills/built-in/pptx/` | Presentations from Markdown via Marp — more reliable than python-pptx for LLM generation |
+| **Sandbox path guard** | `crates/microclaw-tools/src/path_guard.rs` | Blocks `.ssh`, `.aws`, `.gnupg`, `.kube`, `.env`, cloud credential directories |
+| **External caller fencing** | `src/web/a2a.rs` | Visitor-capable A2A endpoints with `x-ownify-caller-kind` header auth |
+
+## Quick start
 
 ```sh
 git clone https://github.com/HaraldeRoessler/ownify-microclaw.git
@@ -40,20 +141,6 @@ cargo build --release --features channel-matrix
 ```
 
 Default web UI: `http://127.0.0.1:10961`
-
-## Deployment
-
-ownify MicroClaw runs as a per-tenant pod on the ownify Kubernetes platform. Each tenant gets dedicated instances:
-
-| Pod | Purpose |
-|---|---|
-| `microclaw` | Agent runtime (this software) |
-| `ownify-router` | LLM request classification + multi-provider routing |
-| `ownify-memgate` | Persistent memory (vector search + knowledge graph) |
-| `ownify-a2a-gateway` | Agent-to-agent protocol with AAE envelope auth |
-| `ownify-egress-scanner` | Outbound data-loss prevention (DLP) |
-
-Deployment is managed by the ownify control plane. See [ownify.ai](https://ownify.ai) for platform details.
 
 ## Docker
 
@@ -77,52 +164,22 @@ docker run --rm -it \
   ghcr.io/haralderoessler/ownify-microclaw:latest
 ```
 
-## Architecture
-
-```
-crates/
-    microclaw-core/      # Shared error/types/text
-    microclaw-storage/   # SQLite DB + memory + usage reporting
-    microclaw-tools/     # Tool runtime primitives + sandbox
-    microclaw-channels/  # Channel abstractions
-    microclaw-app/       # App support (logging, builtin skills, transcribe)
-
-src/
-    main.rs              # CLI entry
-    runtime.rs           # Runtime bootstrap + adapter startup
-    agent_engine.rs      # Channel-agnostic agent loop
-    llm.rs               # Provider abstraction (Anthropic/OpenAI)
-    channels/*.rs        # Telegram, Discord, Slack, Feishu, IRC adapters
-    tools/*.rs           # Built-in tools + registry
-    scheduler.rs         # Background scheduler + reflector loop
-    web.rs               # Web API + stream endpoints
-```
-
-Key design:
-- Session resume persists full message history (including tool blocks) in SQLite
-- Context compaction summarizes old messages to stay within limits
-- Provider abstraction with native Anthropic + OpenAI-compatible endpoints
-- SQLite with WAL mode for concurrent access
-- Exponential backoff on 429 rate limits (3 retries)
-
 ## Key features
 
 - **Agentic tool use** — bash, file I/O, glob, grep, persistent memory
 - **Session resume** — full conversation state persisted across restarts
-- **Context compaction** — automatic summarization of old messages
-- **Sub-agents** — delegate sub-tasks to parallel agent runs
+- **Context compaction** — automatic summarization of old messages to stay within context limits
+- **Sub-agents** — delegate sub-tasks to parallel agent runs with restricted tool sets
 - **Agent skills** — Anthropic Skills-compatible, auto-discovered from `<data_dir>/skills/`
-- **Plan & execute** — todo list for breaking down complex tasks
-- **Web search** — DuckDuckGo + web page fetching
+- **Plan & execute** — todo list for breaking down complex tasks, tracking progress
+- **Web search** — DuckDuckGo + web page fetching and parsing
 - **Scheduled tasks** — 6-field cron expressions, natural language management
 - **Multi-channel** — one runtime across Telegram, Discord, Slack, Feishu, IRC, and Web
-- **Persistent memory** — AGENTS.md files + structured SQLite memory with layered injection
+- **Persistent memory** — AGENTS.md files + structured SQLite memory with layered injection (L0 Identity / L1 Essential / L2 Relevance)
 
-See the [upstream documentation](https://microclaw.ai) for full tool reference, config defaults, and provider matrix.
+For the full tool reference, config defaults, and provider matrix, see the [upstream documentation](https://microclaw.ai).
 
 ## Built-in skills
-
-ownify ships with these skills (in `skills/built-in/`):
 
 | Skill | Purpose |
 |---|---|
@@ -135,28 +192,46 @@ ownify ships with these skills (in `skills/built-in/`):
 | `autonomous-coder` | Autonomous coding workflow |
 | `weather`, `yahoo-finance` | Data lookup |
 
-## Commands
+## Slash commands
 
-- `/reset` — clear current chat session
-- `/status` — show runtime/session status
-- `/skills` — list available skills
-- `/usage` — show token usage summary
-- `/provider` — show/switch provider profile
-- `/model` — show/switch model
-- `/archive` — archive current session
-- `/clear` — clear chat context, keep tasks
-- `/stop` — abort current run
+| Command | Effect |
+|---|---|
+| `/reset` | Clear current chat session |
+| `/status` | Show runtime/session status |
+| `/skills` | List available skills |
+| `/usage` | Show token usage summary |
+| `/provider` | Show or switch provider profile |
+| `/model` | Show or switch model |
+| `/archive` | Archive current session to markdown |
+| `/clear` | Clear chat context, keep scheduled tasks |
+| `/stop` | Abort current in-flight agent run |
+| `/reload-skills` | Reload skills from disk |
+
+## Deployment
+
+ownify MicroClaw runs as per-tenant pods on the ownify Kubernetes platform, managed by the control plane. Each tenant namespace contains:
+
+| Pod | Purpose |
+|---|---|
+| `microclaw` | Agent runtime (this software) |
+| `ownify-router` | Per-request intent classification + multi-provider routing |
+| `ownify-memgate` | Semantic vector search + knowledge graph + auto-compaction |
+| `ownify-a2a-gateway` | Signed inter-agent mesh with per-caller ACLs |
+| `ownify-egress-scanner` | Outbound DLP filtering (fail-closed) |
+
+Images built via ephemeral OVH c3-64 instances using `scripts/ovh-build/build-microclaw.sh`.
 
 ## Documentation
 
 | File | Description |
 |---|---|
-| [DEVELOP.md](DEVELOP.md) | Developer guide |
-| [TEST.md](TEST.md) | Testing guide |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow |
-| [SECURITY.md](SECURITY.md) | Security policy |
-| [SUPPORT.md](SUPPORT.md) | Support policy |
-| [docs/](docs/) | Operations, releases, RFCs, observability |
+| [README.md](README.md) | Overview, architecture, quick start |
+| [DEVELOP.md](DEVELOP.md) | Developer guide — adding tools, debugging |
+| [TEST.md](TEST.md) | Black-box functional test matrix |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and required checks |
+| [SECURITY.md](SECURITY.md) | Security policy and vulnerability reporting |
+| [SUPPORT.md](SUPPORT.md) | Support policy and compatibility targets |
+| [docs/](docs/) | Operations runbooks, release checklists, RFCs |
 
 For the full upstream documentation, see [microclaw.ai](https://microclaw.ai).
 
