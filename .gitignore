@@ -13,3 +13,4 @@ web/dist/
 result
 .claude/
 microclaw_*.snap
+.DS_Store
