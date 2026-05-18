@@ -8,7 +8,7 @@
 
 **ownify** is a self-hosted, multi-tenant Kubernetes platform for running AI agents at scale. Born from the belief that powerful agent infrastructure should be open-source, transparent, and under your control. No vendor lock-in, no hidden pricing tiers — just production-grade agent hosting you own end-to-end.
 
-ownify MicroClaw is the agent runtime that powers every ownify tenant. Built on [MicroClaw](https://microclaw.ai) — the leading Rust multi-channel agent runtime (MIT) — it extends the upstream with enterprise-grade isolation, intelligent routing, durable memory, agent-to-agent mesh networking, and data-loss prevention. The result is a battle-tested stack that runs thousands of agents across Telegram, Discord, Slack, Matrix, and the Web, each in their own sandboxed environment with full tool and memory access.
+ownify MicroClaw is the agent runtime that powers every ownify tenant. Built on [MicroClaw](https://microclaw.ai) — the leading Rust multi-channel agent runtime (MIT) — it extends the upstream with enterprise-grade isolation, intelligent routing, durable memory, agent-to-agent mesh networking, and data-loss prevention. Agent identity and inter-agent trust are backed by the [MolTrust Protocol](https://moltrust.ch) ([MoltyCel/moltrust-api](https://github.com/MoltyCel/moltrust-api)) — W3C DIDs, Ed25519-signed AAE envelopes, and on-chain public key anchoring on Base L2. The result is a battle-tested stack that runs thousands of agents across Telegram, Discord, Slack, Matrix, and the Web, each in their own sandboxed environment with full tool and memory access.
 
 ### Key principles
 
