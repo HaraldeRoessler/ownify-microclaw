@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-MicroClaw currently supports security fixes for the latest release on `main` and the most recent prior tagged release.
+ownify MicroClaw currently supports security fixes for the latest release on `main` and the most recent prior tagged release.
 
 | Version line | Status |
 |---|---|
@@ -16,7 +16,7 @@ If a vulnerability requires coordinated disclosure, maintainers may patch `main`
 
 Do not open a public GitHub issue for suspected security vulnerabilities.
 
-Report privately by email to `security@microclaw.ai` with:
+Report privately by email to `security@ownify.ai` with:
 
 - affected version or commit SHA
 - impact summary

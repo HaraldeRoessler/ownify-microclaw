@@ -2,7 +2,7 @@
 
 ## Release Channels
 
-MicroClaw uses three practical support states:
+ownify MicroClaw uses three practical support states:
 
 - `main`: active development, expected to stay releasable
 - latest tagged release: primary supported release line

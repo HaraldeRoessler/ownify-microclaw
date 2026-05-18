@@ -1,25 +1,34 @@
 # Changelog
 
-All notable changes to this project should be recorded in this file.
+This is the ownify fork of MicroClaw. For upstream changes, see [microclaw/microclaw](https://github.com/microclaw/microclaw).
 
-The format is loosely based on Keep a Changelog. Dates use UTC.
+## ownify additions
 
-## Unreleased
+### Agent-to-agent (A2A)
 
-### Added
+- AAE-signed envelopes for agent-to-agent communication
+- Per-caller capability ACLs via `x-ownify-caller-kind` and `x-ownify-caller-grants`
+- A2A gateway integration for per-tenant routing
 
-- governance documents for security reporting, contribution expectations, and operator support
-- CI coverage and dependency-audit gates
-- release packaging coverage for macOS artifacts and checksum publication
-- stronger config self-check coverage for risky execution settings
-- official container image release automation for GHCR, with optional Docker Hub mirroring when repository credentials are configured
+### ownify platform integration
 
-### Changed
+- Egress DLP scanning via ownify-egress-scanner (fail-closed by default)
+- URL sanitization for internal cluster DNS names
+- Cluster-side scanner client in `src/egress_scan.rs`
 
-- CI now builds the website docs alongside the web UI
-- release process documentation now points to explicit support and release-policy artifacts
-- Docker builds now compile embedded web assets inside the image build and default the runtime image to `microclaw start`
+### Memory
 
-## 0.1.12
+- ownify-memory-enhanced skill for structured memory protocol
+- a2a-self-log skill for agent-to-agent interaction logging
+- SOUL.md personality injection with ownify branding
 
-- Current release baseline before the maturity-hardening PR
+### Skills
+
+- Marp-based pptx creation instead of python-pptx
+- Built-in skills: ownify-memory-enhanced, a2a-self-log, autonomous-coder
+
+### Security hardening
+
+- External caller fencing in A2A endpoints
+- Path guard blocks: `.ssh`, `.aws`, `.gnupg`, `.kube`, `.env`, and cloud credential files
+- DLP fail-closed posture for egress scanner
