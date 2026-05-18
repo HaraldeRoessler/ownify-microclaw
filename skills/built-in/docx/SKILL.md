@@ -87,7 +87,7 @@ doc = Document("in.docx")
 for p in doc.paragraphs:
     if "{{NAME}}" in p.text:
         for run in p.runs:
-            run.text = run.text.replace("{{NAME}}", "Harald")
+            run.text = run.text.replace("{{NAME}}", "John")
 doc.save("out.docx")
 ```
 

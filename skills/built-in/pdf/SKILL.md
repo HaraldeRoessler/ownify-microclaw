@@ -135,7 +135,7 @@ w, h = A4
 c.setFont("Helvetica-Bold", 18)
 c.drawString(72, h - 72, "Invoice")
 c.setFont("Helvetica", 11)
-c.drawString(72, h - 100, "Harald Roessler · 2026-04-23")
+c.drawString(72, h - 100, "John Doe · 2026")
 c.showPage()
 c.save()
 ```

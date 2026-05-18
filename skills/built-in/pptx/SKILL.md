@@ -94,7 +94,7 @@ header: "Q1 Review · Confidential"
 ---
 
 # Quarterly Review
-## Harald Roessler · 2026-05-15
+## John Doe · 2026
 
 ---
 
@@ -141,7 +141,7 @@ header: "Q1 Review · Confidential"
 
 ## Questions?
 
-Contact: harald.roessler@example.com
+Contact: example@example.com
 ```
 
 ### Images in Marp

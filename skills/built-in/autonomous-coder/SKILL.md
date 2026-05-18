@@ -92,12 +92,13 @@ If tests pass and the user confirmed (or auto-deploy is enabled):
 # Push branch first
 git push origin HEAD
 
-# Trigger deployment via CP API
+# Trigger deployment via your CI/CD pipeline
+# (example — replace with your own deploy command)
 curl -sS -X POST \
-  -H "Authorization: Bearer $OWNIFY_ROUTER_ADMIN_SECRET" \
+  -H "Authorization: Bearer $DEPLOY_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"service":"ownify-router","image":"ghcr.io/haralderoessler/ownify-router:latest"}' \
-  http://ownify-control-plane.ownify.svc.cluster.local:4000/api/admin/deploy
+  -d '{"service":"my-service","image":"ghcr.io/example/image:latest"}' \
+  https://deploy.example.com/api/deploy
 ```
 
 **Rule**: Only deploy if:

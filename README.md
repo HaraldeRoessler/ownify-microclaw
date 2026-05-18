@@ -1,42 +1,34 @@
-# MicroClaw
-<img src="icon.png" alt="MicroClaw logo" width="56" align="right" />
+# ownify MicroClaw
 
-[English](README.md) | [中文](README_CN.md)
-
-[![Website](https://img.shields.io/badge/Website-microclaw.ai-blue)](https://microclaw.ai)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pvmezwkAk5)
-[![Reddit](https://img.shields.io/badge/Reddit-r%2Fmicroclaw-FF4500?logo=reddit&logoColor=white)](https://www.reddit.com/r/microclaw/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+This is a production fork of [MicroClaw](https://microclaw.ai) — the open-source multi-channel agent runtime — extended and hardened for deployment on the ownify platform.
 
-<p align="center">
-  <img src="screenshots/headline.png" alt="MicroClaw headline logo" width="92%" />
-</p>
+**ownify** ([ownify.ai](https://ownify.ai)) is a multi-tenant Kubernetes platform for running AI agents at scale. Each tenant gets isolated pods for microclaw, memory, LLM routing, egress scanning, and agent-to-agent (A2A) communication.
 
-<p align="center">
-  <strong>One agent runtime for Telegram, Discord, Slack, Feishu, IRC, Web, and more.</strong><br />
-  Multi-step tool use, persistent memory, scheduled tasks, skills, MCP, and a local web control plane.
-</p>
+## What this software does
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> |
-  <a href="#install">Install</a> |
-  <a href="#why-microclaw">Why MicroClaw</a> |
-  <a href="#how-it-works">Architecture</a> |
-  <a href="#documentation">Docs</a>
-</p>
+ownify MicroClaw is the agent runtime that powers every ownify tenant agent. It provides:
 
-<p align="center">
-  <strong>Quick Routes:</strong>
-  <a href="docs/generated/tools.md">Tools</a> ·
-  <a href="docs/generated/config-defaults.md">Config Defaults</a> ·
-  <a href="docs/generated/provider-matrix.md">Provider Matrix</a> ·
-  <a href="docs/operations/runbook.md">Runbook</a> ·
-  <a href="docs/operations/http-hook-trigger.md">Web Hooks</a> ·
-  <a href="docs/clawhub/overview.md">ClawHub</a>
-</p>
+- **Multi-channel agent loop**: each agent runs in Telegram, Discord, Slack, Matrix, or Web — same runtime, same tools, same memory.
+- **Intelligent LLM routing**: the per-tenant router classifies every request by intent (code, reasoning, fact, chat, vision) and routes to the optimal model.
+- **Persistent memory**: every agent has its own memgate (memory palace) — thousands of drawers across multiple wings, with semantic search, knowledge graph, and automatic context compaction.
+- **A2A (agent-to-agent)**: agents communicate through the ownify gateway protocol — Ed25519-signed AAE envelopes, MolTrust reputation scoring, per-caller capability ACLs, and cross-peer replay defence.
+- **Tool ecosystem**: built-in skills for documents (docx, pptx, xlsx, pdf), images, email, social media, web search, and autonomous coding.
+- **Scheduled tasks**: agents can run recurring background work.
+- **Enterprise isolation**: every tenant runs dedicated pods for microclaw, memory, LLM routing, and egress — no shared state across tenants.
 
-MicroClaw is an agent runtime for chat surfaces. It gives you one channel-agnostic agent loop, one provider-agnostic LLM layer, and one persistent runtime that can move across Telegram, Discord, Slack, Feishu/Lark, IRC, Web, and additional adapters over time.
+## Upstream project
+
+The core agent runtime is [MicroClaw](https://microclaw.ai) — an open-source project by the MicroClaw team (MIT license). ownify extends it with:
+
+- **ownify-router**: per-tenant LLM request classification + multi-provider routing
+- **ownify-memgate**: persistent agent memory with semantic search + knowledge graph
+- **ownify-a2a-gateway**: agent-to-agent protocol with AAE envelope auth + per-caller ACL
+- **ownify-egress-scanner**: outbound data-loss prevention (DLP) hook
+- **Kubernetes control plane**: per-tenant pod management, peer registry, signing key lifecycle
+- **Built-in ownify memory protocol**: skills for automatic memory storage and retrieval
+- **Marp-based pptx creation**: presentations created from Markdown, not fragile python-pptx code
 
 It works with Anthropic and OpenAI-compatible providers, supports multi-step tool execution, keeps session state across turns, stores durable memory, runs scheduled tasks, and can expose the same runtime through both chat channels and a local web UI.
 
@@ -56,137 +48,38 @@ It works with Anthropic and OpenAI-compatible providers, supports multi-step too
 
 ## Quick Start
 
-Install:
+For local development, clone this repository and build with Cargo:
 
 ```sh
-curl -fsSL https://microclaw.ai/install.sh | bash
+cargo build --release --bin microclaw --features channel-matrix
+./target/release/microclaw setup
+./target/release/microclaw start
 ```
 
-Run diagnostics:
+Default local web UI: `http://127.0.0.1:10961`
 
-```sh
-microclaw doctor
-```
+## Deployment
 
-Create config with the interactive wizard:
+ownify MicroClaw runs as a per-tenant pod on the ownify Kubernetes platform. Each tenant gets dedicated instances of:
 
-```sh
-microclaw setup
-```
+| Pod | Purpose |
+|---|---|
+| `microclaw` | Agent runtime (this software) |
+| `ownify-router` | LLM request classification + multi-provider routing |
+| `ownify-memgate` | Persistent memory (vector search + knowledge graph) |
+| `ownify-a2a-gateway` | Agent-to-agent protocol with AAE envelope auth |
+| `ownify-egress-scanner` | Outbound data-loss prevention (DLP) |
 
-Start the runtime:
+Deployment is managed by the ownify control plane. See [ownify.ai](https://ownify.ai) for platform details.
 
-```sh
-microclaw start
-```
+## Documentation
 
-Default local web UI:
-
-```text
-http://127.0.0.1:10961
-```
-
-If you want a source build instead, jump to [Install](#install). If you want operational details, start with [Setup](#setup) and [Documentation](#documentation).
-
-## Install
-
-### One-line installer (recommended)
-
-```sh
-curl -fsSL https://microclaw.ai/install.sh | bash
-```
-
-For the full variant (includes Matrix channel support):
-
-```sh
-curl -fsSL https://microclaw.ai/install.sh | bash -s -- --full
-```
-
-### Windows PowerShell installer
-
-```powershell
-iwr https://microclaw.ai/install.ps1 -UseBasicParsing | iex
-```
-
-For the full variant (adds Matrix channel) on Windows:
-
-```powershell
-& ([scriptblock]::Create((iwr https://microclaw.ai/install.ps1 -UseBasicParsing).Content)) -Full
-```
-
-This installer only does one thing:
-- Download and install the matching prebuilt binary from the latest GitHub release
-- It does not fallback to Homebrew/Cargo inside `install.sh` (use separate methods below)
-
-Upgrade in place later:
-
-```sh
-microclaw upgrade
-```
-
-### Preflight diagnostics
-
-Run cross-platform diagnostics before first start (or when troubleshooting):
-
-```sh
-microclaw doctor
-```
-
-Machine-readable output for support tickets:
-
-```sh
-microclaw doctor --json
-```
-
-Checks include PATH, shell runtime, `agent-browser`, PowerShell policy (Windows), and MCP command dependencies from `<data_dir>/mcp.json` plus `<data_dir>/mcp.d/*.json`.
-
-Sandbox-only diagnostics:
-
-```sh
-microclaw doctor sandbox
-```
-
-### Uninstall (script)
-
-macOS/Linux:
-
-```sh
-curl -fsSL https://microclaw.ai/uninstall.sh | bash
-```
-
-Windows PowerShell:
-
-```powershell
-iwr https://microclaw.ai/uninstall.ps1 -UseBasicParsing | iex
-```
-
-### Homebrew (macOS)
-
-```sh
-brew tap microclaw/tap
-brew install microclaw          # default
-brew install microclaw-full     # full (adds Matrix channel)
-```
-
-### Docker image
-
-Release tags publish an official container image to:
-
-- `ghcr.io/microclaw/microclaw:latest`
-- `ghcr.io/microclaw/microclaw:<version>`
-- `docker.io/microclaw/microclaw:latest` when Docker Hub publishing credentials are configured for the repository
-
-For first-time pulls from GHCR, you may need:
-
-```sh
-docker login ghcr.io
-```
-
-Use your GitHub username and a Personal Access Token with `read:packages`.
-
-Quickest way to try the image:
-
-```sh
+- [Tools](docs/generated/tools.md)
+- [Config Defaults](docs/generated/config-defaults.md)
+- [Provider Matrix](docs/generated/provider-matrix.md)
+- [Runbook](docs/operations/runbook.md)
+- [Web Hooks](docs/operations/http-hook-trigger.md)
+- [ClawHub](docs/clawhub/overview.md)
 docker pull ghcr.io/microclaw/microclaw:latest
 docker run --rm -it \
   -p 127.0.0.1:10961:10961 \

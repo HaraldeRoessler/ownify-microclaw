@@ -12,37 +12,34 @@ MicroClaw A2A sessions are stateless and discarded after each response. Without 
 
 After responding to EVERY A2A message. The inbound A2A request carries these headers:
 
-- `x-ownify-caller-did` — the DID of the agent that contacted you
-- `x-ownify-aae` — the signed AAE envelope (contains caller identity)
+- `x-caller-did` — the DID of the agent that contacted you
+- `x-envelope` — the signed authorization envelope (contains caller identity)
 
 ## What to do
 
 Extract the caller identity, summarize the interaction, write to your diary:
 
 ```
-1. Identify caller: read x-ownify-caller-did header (or decode AAE envelope)
+1. Identify caller: read x-caller-did header (or decode auth envelope)
 2. Summarize: 1-2 sentences — who asked what, what you answered
-3. Write to ownify-memory:
-   ownify_store_diary_entry(
+3. Store in your memory system:
+   store_diary_entry(
      content = "[A2A][from {caller_did}] Received task: {summary}. Replied: {response_summary}.",
      tags = ["a2a", "interaction", "{caller_did}"]
    )
-```
 
 ## Example
 
-Inbound A2A from `did:moltrust:2d843526de08485e` (Sov) asking "What's the dev status?"
+Inbound A2A from `did:example:alice` (Alice) asking "What's the dev status?"
 
 After responding, immediately write:
 
 ```
-ownify_store_diary_entry(
-  content = "[A2A][from did:moltrust:2d843526de08485e] Received: asked for dev status update. Replied: reported production health, open blockers, and access level.",
-  tags = ["a2a", "interaction", "did:moltrust:2d843526de08485e"]
+store_diary_entry(
+  content = "[A2A][from did:example:alice] Received: asked for dev status update. Replied: reported service health, open issues, and access level.",
+  tags = ["a2a", "interaction", "did:example:alice"]
 )
 ```
-
-This entry lands in `diary/YYYY-MM-DD`. Memory pre-fetch surfaces it in future conversations.
 
 ## Anti-patterns
 
