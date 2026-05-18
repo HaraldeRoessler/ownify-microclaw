@@ -47,7 +47,7 @@ const EXTERNAL_A2A_ALWAYS_ON: &[&str] = &["read_memory", "write_memory"];
 ///     gateway versions before Component 2 / CP fetch failures).
 ///   - Header **present** → strict per-tool mode.
 ///     allowed = (invoke_tool:* entries from header ∩ EXTERNAL_A2A_TOOLS)
-///              ∪ EXTERNAL_A2A_ALWAYS_ON.
+///     ∪ EXTERNAL_A2A_ALWAYS_ON.
 ///     Capabilities outside EXTERNAL_A2A_TOOLS (e.g. admin granted
 ///     `invoke_tool:sendgrid` to an external caller) are silently
 ///     dropped — the runtime fence is the source of truth, not the
