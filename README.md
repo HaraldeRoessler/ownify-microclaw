@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/ghcr-haralderoessler%2Fownify--microclaw-blue)](https://github.com/HaraldeRoessler/ownify-microclaw/pkgs/container/ownify-microclaw)
+[![MolTrust](https://img.shields.io/badge/MolTrust-Agent_Trust-8A2BE2)](https://moltrust.ch)
 
 ## About
 
@@ -14,7 +15,7 @@ ownify MicroClaw is the agent runtime that powers every ownify tenant. Built on 
 - **Multi-tenant by design** — every agent runs in dedicated Kubernetes pods with no shared state
 - **Provider-agnostic** — Anthropic and OpenAI-compatible, routed per-request by intent classification
 - **Memory-first** — semantic search, knowledge graph, automatic compaction — agents never forget
-- **Secure from day one** — AAE-signed inter-agent envelopes, per-caller ACLs, egress DLP scanning
+- **Secure from day one** — MolTrust-backed AAE-signed inter-agent envelopes, per-caller ACLs, egress DLP scanning
 - **Self-hosted, open-source** — deploy on your own infrastructure with full observability
 
 ## Platform architecture
@@ -36,8 +37,12 @@ graph TB
     subgraph "External"
         USR["Users<br/>TG / Discord / Slack / Web"]
         LLM["LLM Providers<br/>Anthropic · OpenAI · Ollama"]
+        MT["MolTrust API<br/>DID Registry · Base L2<br/>Agent Trust Layer"]
         PEER["Peer Agents<br/>Other Tenants"]
     end
+
+    MT -.-> |DID resolution| G
+    MT -.-> |AAE verification| CP
 
     USR --> MC
     MC --> R
@@ -113,6 +118,20 @@ ownify-microclaw/
     hooks/                         # Sample hooks
     scripts/                       # CI helpers, OVH build script
 ```
+
+## MolTrust trust infrastructure
+
+[**MolTrust**](https://moltrust.ch) ([github.com/MoltyCel/moltrust-api](https://github.com/MoltyCel/moltrust-api)) provides the agent identity and trust layer for ownify's A2A mesh. Every inter-agent message carries an Agent Authorization Envelope (AAE) — an Ed25519-signed payload specifying the sender's DID, the receiver, the intended action (MANDATE), constraints, and validity window. Envelopes are verified against MolTrust's on-chain DID registry on Base L2, enabling fully offline verification via [@moltrust/verify](https://github.com/MoltyCel/moltrust-verify).
+
+ownify uses MolTrust for:
+
+- **Agent identity** — every tenant agent registers a W3C DID anchored on Base L2
+- **Authorization envelopes** — AAE MANDATE/CONSTRAINTS/VALIDITY for every A2A interaction
+- **Cross-peer replay defence** — envelope sub field must match receiver's tenant slug, checked by the A2A gateway firewall
+- **Reputation** — peer endorsements and trust scores (MolTrust phase 2)
+- **Output provenance** — Interaction Proof Records (IPR) with SHA-256 Merkle batch anchoring
+
+For the full protocol, see the [MolTrust whitepaper](https://moltrust.ch/MolTrust_Protocol_Whitepaper_v0.6.1.pdf) and [technical specification](https://moltrust.ch/MolTrust_Protocol_TechSpec_v0.4.pdf).
 
 ## How it extends upstream
 
@@ -234,6 +253,13 @@ Images built via ephemeral OVH c3-64 instances using `scripts/ovh-build/build-mi
 | [docs/](docs/) | Operations runbooks, release checklists, RFCs |
 
 For the full upstream documentation, see [microclaw.ai](https://microclaw.ai).
+
+## Related repositories
+
+| Repository | Role |
+|---|---|
+| [HaraldeRoessler/ownify-control-plane](https://github.com/HaraldeRoessler/ownify-control-plane) | Kubernetes control plane — tenant provisioning, peer registry, signing key lifecycle |
+| [MoltyCel/moltrust-api](https://github.com/MoltyCel/moltrust-api) | MolTrust protocol — agent DID registry, AAE, Base L2 anchoring |
 
 ## License
 
