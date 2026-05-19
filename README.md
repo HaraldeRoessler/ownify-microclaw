@@ -1,5 +1,6 @@
 # ownify MicroClaw
 
+[![CI](https://github.com/HaraldeRoessler/ownify-microclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/HaraldeRoessler/ownify-microclaw/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/ghcr-haralderoessler%2Fownify--microclaw-blue)](https://github.com/HaraldeRoessler/ownify-microclaw/pkgs/container/ownify-microclaw)
 [![MolTrust](https://img.shields.io/badge/MolTrust-Agent_Trust-8A2BE2)](https://moltrust.ch)
