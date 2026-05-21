@@ -4527,9 +4527,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
  "memchr",
@@ -4790,9 +4790,9 @@ dependencies = [
 
 [[package]]
 name = "sqlite-vec"
-version = "0.1.10-alpha.3"
+version = "0.1.10-alpha.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b89e325282d9d05a53c7e5510b886d9510059c2b854c9606d07652549686f1"
+checksum = "6436dbf1d78c5015f9ae21822dbaa32368039d6b07708874a432c33c0548e47d"
 dependencies = [
  "cc",
 ]
