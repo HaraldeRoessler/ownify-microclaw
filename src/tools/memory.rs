@@ -208,6 +208,8 @@ pub struct WriteMemoryTool {
     groups_dir: PathBuf,
     db: Arc<Database>,
     memory_backend: Arc<MemoryBackend>,
+    #[allow(dead_code)]
+    dry_run_enabled: bool,
 }
 
 impl WriteMemoryTool {
@@ -216,6 +218,7 @@ impl WriteMemoryTool {
             groups_dir: PathBuf::from(data_dir).join("groups"),
             db,
             memory_backend,
+            dry_run_enabled: false,
         }
     }
 }
@@ -252,6 +255,10 @@ impl Tool for WriteMemoryTool {
     }
 
     async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        if std::env::var("MEMORY_LOOP_DRY_RUN").is_ok() {
+            return ToolResult::success("Memory recorded.".into());
+        }
+
         let scope = match input.get("scope").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return ToolResult::error("Missing 'scope' parameter".into()),

@@ -18,6 +18,7 @@ use microclaw_core::llm_types::{
     ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock,
 };
 use microclaw_core::text::floor_char_boundary;
+use microclaw_observability::memory_loop::LoopTrace;
 use microclaw_observability::traces::{
     kv, kv_int, new_span_id, new_trace_id, now_unix_nano, SpanData,
 };
@@ -553,6 +554,14 @@ pub(crate) async fn process_with_agent_impl(
     let start_time = now_unix_nano();
     let mut metrics = AgentMetrics::default();
 
+    // MEMORY_LOOP_TRACE: create a per-turn trace collector when
+    // both the env var is set and an OTLP exporter is available.
+    let mut loop_trace = state
+        .trace_exporter
+        .as_ref()
+        .filter(|_| std::env::var("MEMORY_LOOP_TRACE").is_ok())
+        .map(|exp| LoopTrace::new(&context.chat_id.to_string(), 0, exp.clone()));
+
     let result = process_with_agent_logic(
         state,
         context,
@@ -562,8 +571,13 @@ pub(crate) async fn process_with_agent_impl(
         &mut metrics,
         &trace_id,
         &root_span_id,
+        &mut loop_trace,
     )
     .await;
+
+    if let Some(lt) = loop_trace {
+        lt.flush();
+    }
 
     if let Some(exp) = &state.trace_exporter {
         let mut attrs = vec![
@@ -631,6 +645,7 @@ async fn process_with_agent_logic(
     metrics: &mut AgentMetrics,
     trace_id: &[u8],
     parent_span_id: &[u8],
+    loop_trace: &mut Option<LoopTrace>,
 ) -> anyhow::Result<String> {
     let chat_id = context.chat_id;
     let request_start = std::time::Instant::now();
@@ -768,6 +783,20 @@ async fn process_with_agent_logic(
     )
     .await;
     let memory_context = format!("{}{}", file_memory, db_memory);
+
+    if let Some(lt) = loop_trace {
+        lt.record(
+            "memory_loaded",
+            serde_json::json!({
+                "file_memory_len": file_memory.len(),
+                "db_memory_len": db_memory.len(),
+                "total_memory_len": memory_context.len(),
+                "query": query,
+                "chat_id": chat_id,
+            }),
+        );
+    }
+
     let skills_catalog = state.skills.build_skills_catalog();
     let soul_content = load_soul_content(&state.config, context.caller_channel, chat_id);
     let bot_username = state
