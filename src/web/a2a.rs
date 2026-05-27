@@ -1,8 +1,10 @@
 use super::*;
 use crate::a2a::{
-    build_agent_card, default_session_key_for_source, local_agent_name, A2AMessageRequest,
-    A2AMessageResponse, A2A_PROTOCOL_VERSION,
+    build_agent_card, default_session_key_for_source, local_agent_name, sanitize_for_json,
+    A2AMessageRequest, A2AMessageResponse, A2ATaskRequest, A2ATaskResponse,
+    A2ATaskStatusResponse, A2A_PROTOCOL_VERSION,
 };
+use axum::extract::Query;
 
 /// Tool allowlist for external (non-tenant) A2A callers. Set when the
 /// gateway forwards `x-ownify-caller-kind: external`. Deliberately
@@ -143,7 +145,7 @@ pub(super) async fn api_a2a_message(
         return Err((StatusCode::UNAUTHORIZED, "invalid A2A bearer token".into()));
     }
 
-    let message = body.message.trim().to_string();
+    let message = sanitize_for_json(body.message.trim());
     if message.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "message is required".into()));
     }
@@ -209,5 +211,78 @@ pub(super) async fn api_a2a_message(
         agent_name: local_agent_name(&state.app_state.config),
         session_key: resolved_session_key,
         response,
+    }))
+}
+
+// ── A2A Task Create (async delegation) ─────────────────────────────────────
+
+pub(super) async fn api_a2a_task_create(
+    headers: HeaderMap,
+    State(state): State<WebState>,
+    Json(body): Json<A2ATaskRequest>,
+) -> Result<Json<A2ATaskResponse>, (StatusCode, String)> {
+    metrics_http_inc(&state).await;
+    if !state.app_state.config.a2a.enabled {
+        return Err((StatusCode::NOT_FOUND, "A2A is disabled".into()));
+    }
+    if state.app_state.config.a2a.shared_tokens.is_empty() {
+        return Err((StatusCode::FORBIDDEN, "A2A inbound auth not configured".into()));
+    }
+    if !a2a_token_allowed(&state.app_state.config, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid A2A bearer token".into()));
+    }
+    let task_text = sanitize_for_json(body.task.trim());
+    if task_text.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "task is required".into()));
+    }
+    let source_agent = body.source_agent.as_deref().unwrap_or("a2a-remote").to_string();
+    let task_id = format!("a2a-{}-{}",
+        &source_agent[..source_agent.len().min(16)],
+        chrono::Utc::now().timestamp());
+    let db = state.app_state.db.clone();
+    let prompt = format!("[A2A-TASK from {}]\n\n{}", source_agent, task_text);
+    let now = chrono::Utc::now().to_rfc3339();
+    let _task_id: i64 = match db.create_scheduled_task(0, &prompt, "once", &now, &now) {
+        Ok(id) => id,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("failed to queue task: {e}"))),
+    };
+    let task_id_str = format!("a2a-{}", _task_id);
+
+    audit_log(&state, "a2a", &source_agent, "a2a.task.create", Some(&task_id_str), "ok", body.source_url.as_deref()).await;
+    Ok(Json(A2ATaskResponse {
+        status: "accepted".to_string(),
+        task_id,
+    }))
+}
+
+// ── A2A Task Status ─────────────────────────────────────────────────────────
+
+pub(super) async fn api_a2a_task_status(
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<WebState>,
+) -> Result<Json<A2ATaskStatusResponse>, (StatusCode, String)> {
+    metrics_http_inc(&state).await;
+    if !state.app_state.config.a2a.enabled {
+        return Err((StatusCode::NOT_FOUND, "A2A is disabled".into()));
+    }
+    if !a2a_token_allowed(&state.app_state.config, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid A2A bearer token".into()));
+    }
+    let Some(task_id) = params.get("task_id").map(|s| s.as_str()) else {
+        return Err((StatusCode::BAD_REQUEST, "task_id query parameter is required".into()));
+    };
+    let db = state.app_state.db.clone();
+    let task_id_int: i64 = task_id.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid task_id".into()))?;
+    let (status_str, result_opt) = match db.get_task_status_for_a2a(task_id_int) {
+        Ok(Some((status, result))) => (status, result),
+        Ok(None) => return Err((StatusCode::NOT_FOUND, format!("task {task_id} not found"))),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}"))),
+    };
+    audit_log(&state, "a2a", "a2a-caller", "a2a.task.status", Some(task_id), "ok", None).await;
+    Ok(Json(A2ATaskStatusResponse {
+        task_id: task_id.to_string(),
+        status: status_str,
+        result: result_opt,
     }))
 }

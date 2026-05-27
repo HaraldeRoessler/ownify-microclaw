@@ -1906,6 +1906,23 @@ impl Database {
             Ok((total, success))
         }
     }
+
+    pub fn get_task_status_for_a2a(&self, task_id: i64) -> Result<Option<(String, Option<String>)>, MicroClawError> {
+        let task = match self.get_task_by_id(task_id)? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let status = task.status.clone();
+        let mut result: Option<String> = None;
+        if status == "completed" || status == "cancelled" {
+            let run_logs = self.get_task_run_logs(task_id, 1)?;
+            if let Some(log) = run_logs.first() {
+                result = log.result_summary.clone();
+            }
+        }
+        Ok(Some((status, result)))
+    }
+
     pub fn insert_scheduled_task_dlq(
         &self,
         task_id: i64,

@@ -5,6 +5,8 @@ use crate::config::Config;
 pub const A2A_PROTOCOL_VERSION: &str = "microclaw-a2a/v1";
 pub const A2A_AGENT_CARD_PATH: &str = "/api/a2a/agent-card";
 pub const A2A_MESSAGE_PATH: &str = "/api/a2a/message";
+pub const A2A_TASK_CREATE_PATH: &str = "/api/a2a/task";
+pub const A2A_TASK_STATUS_PATH: &str = "/api/a2a/task/status";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct A2AAgentCard {
@@ -23,6 +25,8 @@ pub struct A2AAgentCard {
 pub struct A2AEndpoints {
     pub agent_card: String,
     pub message: String,
+    pub task_create: String,
+    pub task_status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,13 +43,46 @@ pub struct A2AMessageRequest {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct A2AMessageResponse {
     pub ok: bool,
     pub protocol_version: String,
     pub agent_name: String,
     pub session_key: String,
     pub response: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct A2AOutputPart {
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct A2ATaskRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    pub task: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct A2ATaskResponse {
+    pub status: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct A2ATaskStatusResponse {
+    pub task_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
 }
 
 pub fn normalize_peer_name(name: &str) -> Option<String> {
@@ -95,6 +132,16 @@ pub fn default_session_key_for_source(source_agent: Option<&str>) -> String {
         .unwrap_or_else(|| "a2a:remote".to_string())
 }
 
+/// Strips ASCII control characters (0x00-0x1F) except \t, \n, \r
+/// from a message string. Must be applied before storing/using
+/// the message anywhere — prevents "Bad control character in JSON"
+/// errors from standards-compliant parsers (e.g. Node.js body-parser).
+pub fn sanitize_for_json(msg: &str) -> String {
+    msg.chars()
+        .filter(|&c| c >= '\u{0020}' || c == '\t' || c == '\n' || c == '\r')
+        .collect()
+}
+
 pub fn build_agent_card(config: &Config) -> A2AAgentCard {
     let base_url = config
         .a2a
@@ -128,6 +175,8 @@ pub fn build_agent_card(config: &Config) -> A2AAgentCard {
         endpoints: A2AEndpoints {
             agent_card: format!("{prefix}{A2A_AGENT_CARD_PATH}"),
             message: format!("{prefix}{A2A_MESSAGE_PATH}"),
+            task_create: format!("{prefix}{A2A_TASK_CREATE_PATH}"),
+            task_status: format!("{prefix}{A2A_TASK_STATUS_PATH}"),
         },
         capabilities: vec!["sync-message".to_string()],
     }
