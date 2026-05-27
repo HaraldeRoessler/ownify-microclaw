@@ -98,3 +98,4 @@ tower = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8.1"
+
