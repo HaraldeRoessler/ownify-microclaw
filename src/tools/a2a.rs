@@ -3,9 +3,9 @@ use serde_json::json;
 
 use super::{schema_object, Tool, ToolResult};
 use crate::a2a::{
-    normalize_base_url, normalize_peer_name, sanitize_for_json, A2AMessageRequest,
-    A2AMessageResponse, A2ATaskRequest, A2ATaskResponse, A2ATaskStatusResponse,
-    A2A_AGENT_CARD_PATH, A2A_MESSAGE_PATH, A2A_PROTOCOL_VERSION,
+    find_peer, normalize_base_url, normalize_peer_name, sanitize_for_json,
+    A2AMessageRequest, A2AMessageResponse, A2ATaskRequest, A2ATaskResponse,
+    A2ATaskStatusResponse, A2A_AGENT_CARD_PATH, A2A_MESSAGE_PATH, A2A_PROTOCOL_VERSION,
     A2A_TASK_CREATE_PATH, A2A_TASK_STATUS_PATH,
 };
 use crate::config::Config;
@@ -145,7 +145,7 @@ impl Tool for A2ASendTool {
         let Some(peer_key) = normalize_peer_name(peer_name) else {
             return ToolResult::error("Parameter `peer` cannot be empty".into());
         };
-        let Some(peer) = self.config.a2a.peers.get(&peer_key) else {
+        let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
             return ToolResult::error(format!("Unknown A2A peer: {peer_name}"));
         };
         if !peer.enabled {
@@ -279,7 +279,7 @@ impl Tool for A2ATaskDelegateTool {
         let Some(peer_key) = normalize_peer_name(peer_name) else {
             return ToolResult::error("Parameter `peer` cannot be empty".into());
         };
-        let Some(peer) = self.config.a2a.peers.get(&peer_key) else {
+        let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
             return ToolResult::error(format!("Unknown A2A peer: {peer_name}"));
         };
         if !peer.enabled {
@@ -398,7 +398,7 @@ impl Tool for A2ATaskStatusTool {
         let Some(peer_key) = normalize_peer_name(peer_name) else {
             return ToolResult::error("Parameter `peer` cannot be empty".into());
         };
-        let Some(peer) = self.config.a2a.peers.get(&peer_key) else {
+        let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
             return ToolResult::error(format!("Unknown A2A peer: {peer_name}"));
         };
         if !peer.enabled {
