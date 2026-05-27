@@ -94,6 +94,24 @@ pub fn normalize_peer_name(name: &str) -> Option<String> {
     }
 }
 
+/// Find a peer config key by user-provided name — case-insensitive prefix match.
+/// "simon" → "Simon Ward", "rune" → "Rune - Marketing Agent", etc.
+pub fn find_peer<'a>(peers: &'a std::collections::HashMap<String, crate::config::A2APeerConfig>, name: &str) -> Option<&'a crate::config::A2APeerConfig> {
+    let key = normalize_peer_name(name)?;
+    // Exact match first
+    if let Some(peer) = peers.get(&key) {
+        return Some(peer);
+    }
+    // Prefix match: find first peer whose normalized name starts with the query
+    for (k, v) in peers {
+        let nk = k.trim().to_ascii_lowercase();
+        if nk.starts_with(&key) || nk.split(' ').next() == Some(&key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 pub fn normalize_base_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
