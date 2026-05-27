@@ -178,6 +178,8 @@ impl ToolRegistry {
             )),
             Box::new(a2a::A2AListPeersTool::new(config)),
             Box::new(a2a::A2ASendTool::new(config)),
+            Box::new(a2a::A2ATaskDelegateTool::new(config)),
+            Box::new(a2a::A2ATaskStatusTool::new(config)),
             Box::new(schedule::ScheduleTaskTool::new(
                 channel_registry.clone(),
                 db.clone(),
