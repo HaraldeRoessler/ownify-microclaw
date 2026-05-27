@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod memory_backend;
 pub mod memory_service;
 pub mod plugins;
+pub mod post_retrieval_planner;
 pub(crate) mod run_control;
 pub mod runtime;
 pub mod scheduler;

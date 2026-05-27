@@ -11,6 +11,7 @@ use crate::config::{
 };
 use crate::hooks::HookOutcome;
 use crate::memory_service::{build_db_memory_context, maybe_handle_explicit_memory_command};
+use crate::post_retrieval_planner::{self, PostRetrievalPlanner};
 use crate::run_control;
 use crate::runtime::AppState;
 use crate::tools::ToolAuthContext;
@@ -802,6 +803,18 @@ async fn process_with_agent_logic(
     let bot_username = state
         .config
         .bot_username_for_channel(context.caller_channel);
+
+    // Post-retrieval planner: derive actionable rules from memory.
+    let planner = PostRetrievalPlanner::new();
+    let insights = planner.plan(&memory_context, &query);
+
+    if let Some(lt) = loop_trace {
+        lt.record(
+            "retrieval_planned",
+            post_retrieval_planner::planner_insights_payload(&insights),
+        );
+    }
+
     let mut system_prompt = build_system_prompt(
         &bot_username,
         context.caller_channel,
@@ -810,6 +823,7 @@ async fn process_with_agent_logic(
         &skills_catalog,
         &state.config.timezone,
         soul_content.as_deref(),
+        &insights,
     );
     let plugin_context = crate::plugins::collect_plugin_context_injections(
         &state.config,
@@ -1822,6 +1836,7 @@ pub(crate) fn build_system_prompt(
     skills_catalog: &str,
     configured_timezone: &str,
     soul_content: Option<&str>,
+    insights: &[crate::post_retrieval_planner::PlannerInsight],
 ) -> String {
     let now_utc = chrono::Utc::now();
     let tz_label = configured_timezone
@@ -1961,6 +1976,12 @@ Built-in execution playbook:
 
     if let Some(channel_prompt) = crate::channels::system_prompt_extension(caller_channel) {
         prompt.push_str(channel_prompt);
+    }
+
+    // Inject post-retrieval planner insights BEFORE raw memories
+    // so the LLM treats derived rules as higher-priority constraints.
+    if let Some(adaptation_block) = PostRetrievalPlanner::new().format_for_prompt(insights) {
+        prompt.push_str(&adaptation_block);
     }
 
     if !memory_context.is_empty() {
@@ -3486,7 +3507,7 @@ mod tests {
     fn test_build_system_prompt_with_soul() {
         let soul = "I am a friendly pirate assistant. I speak in pirate lingo and love adventure.";
         let prompt =
-            super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", Some(soul));
+            super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", Some(soul), &[]);
         assert!(prompt.contains("<soul>"));
         assert!(prompt.contains("pirate"));
         assert!(prompt.contains("</soul>"));
@@ -3497,14 +3518,14 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_without_soul() {
-        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None);
+        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None, &[]);
         assert!(!prompt.contains("<soul>"));
         assert!(prompt.contains("a helpful AI assistant across chat channels"));
     }
 
     #[test]
     fn test_build_system_prompt_mentions_direct_tool_calls_for_simple_read_only_requests() {
-        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None);
+        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None, &[]);
         assert!(prompt.contains("simple, low-risk, read-only requests"));
         assert!(prompt.contains("call the tool immediately and return the result directly"));
         assert!(prompt.contains("Do not ask confirmation questions"));
@@ -3512,7 +3533,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_prefers_chat_working_dir_over_tmp() {
-        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None);
+        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None, &[]);
         assert!(prompt.contains("current chat working directory"));
         assert!(prompt.contains("use the current chat working directory's `tmp/` subdirectory"));
         assert!(prompt.contains("Do not use absolute `/tmp/...` paths"));
@@ -3520,7 +3541,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_discourages_invented_machine_paths() {
-        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None);
+        let prompt = super::build_system_prompt("testbot", "telegram", "", 42, "", "UTC", None, &[]);
         assert!(prompt.contains("prefer relative paths rooted there"));
         assert!(prompt.contains("Do not invent machine-specific absolute paths"));
         assert!(prompt.contains("/home/..."));
@@ -3582,7 +3603,7 @@ mod tests {
 
     #[test]
     fn test_append_plugin_context_sections_splits_prompt_and_documents() {
-        let mut prompt = super::build_system_prompt("testbot", "web", "", 1, "", "UTC", None);
+        let mut prompt = super::build_system_prompt("testbot", "web", "", 1, "", "UTC", None, &[]);
         let injections = vec![
             crate::plugins::PluginContextInjection {
                 plugin_name: "p1".to_string(),
