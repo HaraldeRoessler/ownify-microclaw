@@ -142,7 +142,7 @@ impl Tool for A2ASendTool {
         if message.is_empty() {
             return ToolResult::error("Parameter `message` cannot be empty".into());
         }
-        let Some(peer_key) = normalize_peer_name(peer_name) else {
+        let Some(_peer_key) = normalize_peer_name(peer_name) else {
             return ToolResult::error("Parameter `peer` cannot be empty".into());
         };
         let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
@@ -161,7 +161,7 @@ impl Tool for A2ASendTool {
             .filter(|v| !v.is_empty())
             .map(ToOwned::to_owned)
             .or_else(|| peer.default_session_key.clone())
-            .unwrap_or_else(|| format!("a2a:{peer_key}"));
+            .unwrap_or_else(|| format!("a2a:{}", peer_name));
         let timeout_secs = input
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
@@ -217,7 +217,7 @@ impl Tool for A2ASendTool {
         };
         ToolResult::success(
             serde_json::to_string_pretty(&json!({
-                "peer": peer_key,
+                "peer": peer_name,
                 "protocol_version": parsed.protocol_version,
                 "agent_name": parsed.agent_name,
                 "session_key": parsed.session_key,
@@ -276,7 +276,7 @@ impl Tool for A2ATaskDelegateTool {
         if task.is_empty() {
             return ToolResult::error("Parameter `task` cannot be empty".into());
         }
-        let Some(peer_key) = normalize_peer_name(peer_name) else {
+        let Some(_peer_key) = normalize_peer_name(peer_name) else {
             return ToolResult::error("Parameter `peer` cannot be empty".into());
         };
         let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
@@ -295,7 +295,7 @@ impl Tool for A2ATaskDelegateTool {
             .filter(|v| !v.is_empty())
             .map(ToOwned::to_owned)
             .or_else(|| peer.default_session_key.clone())
-            .unwrap_or_else(|| format!("a2a:{peer_key}"));
+            .unwrap_or_else(|| format!("a2a:{}", peer_name));
         let timeout_secs = input
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
@@ -395,7 +395,7 @@ impl Tool for A2ATaskStatusTool {
         let Some(task_id) = input.get("task_id").and_then(|v| v.as_str()) else {
             return ToolResult::error("Missing required parameter: task_id".into());
         };
-        let Some(peer_key) = normalize_peer_name(peer_name) else {
+        let Some(_peer_key) = normalize_peer_name(peer_name) else {
             return ToolResult::error("Parameter `peer` cannot be empty".into());
         };
         let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
