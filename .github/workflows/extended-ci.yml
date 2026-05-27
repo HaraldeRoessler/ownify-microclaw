@@ -11,7 +11,14 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  # Disabled — windows-latest runner is failing on toolchain download
+  # Placeholder — extended CI temporarily empty (all jobs disabled or moved to main ci.yml)
+  placeholder:
+    name: Placeholder
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "Extended CI — no active jobs"'
+
+# Historical disabled jobs (kept for reference):
   # rust-windows:
   #   name: Rust (windows-latest)
   #   runs-on: windows-latest
