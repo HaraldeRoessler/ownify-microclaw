@@ -70,8 +70,8 @@ impl ChannelAdapter for WebAdapter {
 }
 
 #[derive(Clone)]
-struct WebState {
-    app_state: Arc<AppState>,
+pub struct WebState {
+    pub(crate) app_state: Arc<AppState>,
     bootstrap_token: Arc<Mutex<Option<String>>>,
     run_hub: RunHub,
     session_hub: SessionHub,
@@ -2090,6 +2090,8 @@ fn build_router(web_state: WebState) -> Router {
         .route("/api/skills", get(skills::api_list_skills))
         .route("/api/skills/:name/enable", post(skills::api_enable_skill))
         .route("/api/skills/:name/disable", post(skills::api_disable_skill))
+        .route("/api/voice/transcript", post(crate::channels::matrix_voice::handle_transcript))
+        .route("/api/voice/event", post(crate::channels::matrix_voice::handle_voice_event))
         .with_state(web_state)
 }
 

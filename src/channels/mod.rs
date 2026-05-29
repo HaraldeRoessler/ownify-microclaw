@@ -6,6 +6,7 @@ pub mod imessage;
 pub mod irc;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
+pub mod matrix_voice;
 pub mod nostr;
 pub mod qq;
 pub mod signal;

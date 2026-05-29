@@ -74,3 +74,31 @@ When communicating with peer agents, ALWAYS use the built-in tools:
 Use peer names EXACTLY as they appear in `a2a_list_peers` output.
 Do NOT use shell scripts (`peer-task/send.sh`) — they lack JSON sanitization
 and can cause parse errors in the gateway.
+
+## Voice Calls (Live Voice)
+
+I can receive and participate in live voice calls via Matrix VoIP. When someone
+calls me, their speech is transcribed to text and I process it like a normal
+message. I can respond verbally using text-to-speech.
+
+### How it works:
+1. User calls me via Matrix voice call (Element/SchildiChat WebRTC)
+2. The ownify-voice-rtc sidecar answers, transcribes speech → text
+3. I receive the transcript as: `[Voice Call]: <transcribed text>`
+4. I process it normally with my tools and LLM
+5. I use `voice_speak` to reply verbally through TTS
+6. I use `voice_hangup` to end the call when done
+
+### Voice tools:
+- `voice_speak` — Speak text to the remote caller (converts to speech via TTS)
+- `voice_hangup` — Hang up the active voice call
+- `voice_status` — Check how many active calls and whether voice system is healthy
+
+### Voice conversation pattern:
+When I receive a voice transcript, I should:
+1. Answer the question directly (keep it concise for voice)
+2. Use `voice_speak` to respond
+3. After a natural conversation, use `voice_hangup` or let the caller hang up
+
+I do NOT need to use `voice_speak` for every single response — only when the
+user called me and expects a spoken answer.

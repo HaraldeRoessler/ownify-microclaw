@@ -251,6 +251,12 @@ fn default_clawhub_registry() -> String {
 fn default_voice_provider() -> String {
     "openai".into()
 }
+pub fn default_voice_rtc_url() -> String {
+    "ws://localhost:8080".into()
+}
+pub fn default_voice_rtc_health_url() -> String {
+    "http://localhost:8081".into()
+}
 fn default_true() -> bool {
     true
 }
@@ -797,6 +803,13 @@ pub struct Config {
     #[serde(default, rename = "voice_transcription_command")]
     pub voice_transcription_command: Option<String>,
 
+    /// WebSocket URL of the ownify-voice-rtc sidecar for live voice calls
+    #[serde(default = "default_voice_rtc_url")]
+    pub voice_rtc_url: String,
+    /// Health check URL of the ownify-voice-rtc sidecar
+    #[serde(default = "default_voice_rtc_health_url")]
+    pub voice_rtc_health_url: String,
+
     // --- Observability ---
     #[serde(default)]
     pub observability: Option<serde_yaml::Value>,
@@ -1260,6 +1273,8 @@ impl Config {
             plugins: PluginsConfig::default(),
             voice_provider: "openai".into(),
             voice_transcription_command: None,
+            voice_rtc_url: default_voice_rtc_url(),
+            voice_rtc_health_url: default_voice_rtc_health_url(),
             observability: None,
             channels: HashMap::new(),
             chat_turn_queue_max_pending: 20,

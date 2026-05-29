@@ -19,6 +19,7 @@ pub mod subagents;
 pub mod sync_skills;
 pub mod time_math;
 pub mod todo;
+pub mod voice;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
@@ -269,6 +270,9 @@ impl ToolRegistry {
             )),
             Box::new(knowledge_graph::KnowledgeGraphQueryTool::new(db.clone())),
             Box::new(knowledge_graph::KnowledgeGraphAddTool::new(db.clone())),
+            Box::new(voice::VoiceSpeakTool::new(config)),
+            Box::new(voice::VoiceHangupTool::new(config)),
+            Box::new(voice::VoiceStatusTool::new(config)),
         ];
 
         // Add ClawHub tools if enabled
