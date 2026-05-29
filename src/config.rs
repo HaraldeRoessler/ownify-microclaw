@@ -251,6 +251,12 @@ fn default_clawhub_registry() -> String {
 fn default_voice_provider() -> String {
     "openai".into()
 }
+fn default_voice_rtc_url() -> String {
+    "ws://localhost:8080".into()
+}
+fn default_voice_rtc_health_url() -> String {
+    "http://localhost:8081".into()
+}
 fn default_true() -> bool {
     true
 }
@@ -796,6 +802,13 @@ pub struct Config {
     /// Example: "whisper-mlx --file {file}" or "/usr/local/bin/whisper {file}"
     #[serde(default, rename = "voice_transcription_command")]
     pub voice_transcription_command: Option<String>,
+
+    /// WebSocket URL of the ownify-voice-rtc sidecar for live voice calls
+    #[serde(default = "default_voice_rtc_url")]
+    pub voice_rtc_url: String,
+    /// Health check URL of the ownify-voice-rtc sidecar
+    #[serde(default = "default_voice_rtc_health_url")]
+    pub voice_rtc_health_url: String,
 
     // --- Observability ---
     #[serde(default)]
