@@ -1,18 +1,18 @@
-/// WebSocket client that connects MicroClaw to the ownify-voice-rtc sidecar.
-///
-/// Protocol (JSON frames):
-///   MicroClaw → voice-rtc:
-///     { "type": "answer",    "call_id": "...", "sdp_offer": "..." }
-///     { "type": "candidate", "call_id": "...", "candidate": "...", "sdpMid": "...", "sdpMLineIndex": 0 }
-///     { "type": "hangup",    "call_id": "..." }
-///     { "type": "respond",   "call_id": "...", "text": "..." }
-///
-///   voice-rtc → MicroClaw:
-///     { "type": "sdp_answer",  "call_id": "...", "sdp": "..." }
-///     { "type": "candidate",   "call_id": "...", "candidate": "...", "sdpMid": "...", "sdpMLineIndex": 0 }
-///     { "type": "transcript",  "call_id": "...", "text": "...", "is_final": true }
-///     { "type": "call_ended",  "call_id": "...", "reason": "..." }
-///     { "type": "error",       "call_id": "...", "message": "..." }
+//! WebSocket client that connects MicroClaw to the ownify-voice-rtc sidecar.
+//!
+//! Protocol (JSON frames):
+//!   MicroClaw → voice-rtc:
+//!     { "type": "answer",    "call_id": "...", "sdp_offer": "..." }
+//!     { "type": "candidate", "call_id": "...", "candidate": "...", "sdpMid": "...", "sdpMLineIndex": 0 }
+//!     { "type": "hangup",    "call_id": "..." }
+//!     { "type": "respond",   "call_id": "...", "text": "..." }
+//!
+//!   voice-rtc → MicroClaw:
+//!     { "type": "sdp_answer",  "call_id": "...", "sdp": "..." }
+//!     { "type": "candidate",   "call_id": "...", "candidate": "...", "sdpMid": "...", "sdpMLineIndex": 0 }
+//!     { "type": "transcript",  "call_id": "...", "text": "...", "is_final": true }
+//!     { "type": "call_ended",  "call_id": "...", "reason": "..." }
+//!     { "type": "error",       "call_id": "...", "message": "..." }
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,7 +108,7 @@ impl VoiceRtcClient {
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 let json = serde_json::to_string(&cmd).unwrap();
-                if let Err(e) = ws_tx.send(Message::Text(json.into())).await {
+                if let Err(e) = ws_tx.send(Message::Text(json)).await {
                     error!("voice-rtc send error: {e}");
                     break;
                 }
@@ -211,6 +211,12 @@ pub enum CallState {
 /// Registry of active voice calls, shared across threads.
 pub struct CallRegistry {
     calls: RwLock<HashMap<String, ActiveCall>>,
+}
+
+impl Default for CallRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CallRegistry {

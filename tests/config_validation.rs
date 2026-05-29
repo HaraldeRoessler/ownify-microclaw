@@ -78,6 +78,8 @@ fn minimal_config() -> Config {
         plugins: microclaw::plugins::PluginsConfig::default(),
         voice_provider: "openai".into(),
         voice_transcription_command: None,
+        voice_rtc_url: microclaw::config::default_voice_rtc_url(),
+        voice_rtc_health_url: microclaw::config::default_voice_rtc_health_url(),
         observability: None,
         channels: std::collections::HashMap::new(),
         chat_turn_queue_max_pending: 20,

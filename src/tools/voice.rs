@@ -1,9 +1,9 @@
-/// Voice call tools for the ownify agent.
-///
-/// Tools:
-///   - voice_speak: Send a text-to-speech response in an active call
-///   - voice_hangup: Hang up an active call
-///   - voice_status: Get status of all active calls
+//! Voice call tools for the ownify agent.
+//!
+//! Tools:
+//!   - voice_speak: Send a text-to-speech response in an active call
+//!   - voice_hangup: Hang up an active call
+//!   - voice_status: Get status of all active calls
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -27,7 +27,7 @@ async fn send_voice_command(command: &Value, voice_rtc_url: &str) -> Result<(), 
     let json = serde_json::to_string(command)
         .map_err(|e| format!("Serialization error: {e}"))?;
 
-    ws.send(Message::Text(json.into()))
+    ws.send(Message::Text(json))
         .await
         .map_err(|e| format!("Send error: {e}"))?;
 

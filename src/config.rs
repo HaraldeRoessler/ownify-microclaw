@@ -251,10 +251,10 @@ fn default_clawhub_registry() -> String {
 fn default_voice_provider() -> String {
     "openai".into()
 }
-fn default_voice_rtc_url() -> String {
+pub fn default_voice_rtc_url() -> String {
     "ws://localhost:8080".into()
 }
-fn default_voice_rtc_health_url() -> String {
+pub fn default_voice_rtc_health_url() -> String {
     "http://localhost:8081".into()
 }
 fn default_true() -> bool {
@@ -1273,6 +1273,8 @@ impl Config {
             plugins: PluginsConfig::default(),
             voice_provider: "openai".into(),
             voice_transcription_command: None,
+            voice_rtc_url: default_voice_rtc_url(),
+            voice_rtc_health_url: default_voice_rtc_health_url(),
             observability: None,
             channels: HashMap::new(),
             chat_turn_queue_max_pending: 20,

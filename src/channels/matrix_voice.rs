@@ -1,4 +1,4 @@
-/// Matrix Voice Call Handler — REST endpoints for voice-rtc sidecar.
+//! Matrix Voice Call Handler — REST endpoints for voice-rtc sidecar.
 
 use std::sync::Arc;
 use axum::extract::State;
