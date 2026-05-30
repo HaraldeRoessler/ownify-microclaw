@@ -1153,6 +1153,32 @@ async fn sync_matrix_messages(
                     key,
                     event_time_ms: event.get("origin_server_ts").and_then(|v| v.as_i64()),
                 });
+            } else if event_type.starts_with("m.call.") {
+                // Forward call events to voice-rtc sidecar for WebRTC handling.
+                if let Some(content) = event.get("content") {
+                    let room_id_owned = room_id.clone();
+                    let sender_owned = sender.clone();
+                    let event_type_owned = event_type.to_string();
+                    let content_owned = content.clone();
+                    tokio::spawn(async move {
+                        let body = serde_json::json!({
+                            "type": event_type_owned,
+                            "room_id": room_id_owned,
+                            "sender": sender_owned,
+                            "content": content_owned,
+                        });
+                        let url = "http://localhost:8081/api/call/event";
+                        if let Err(e) = reqwest::Client::new()
+                            .post(url)
+                            .json(&body)
+                            .timeout(Duration::from_secs(5))
+                            .send()
+                            .await
+                        {
+                            warn!("Failed to forward call event to voice-rtc: {e}");
+                        }
+                    });
+                }
             }
         }
     }
