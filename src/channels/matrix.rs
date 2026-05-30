@@ -14,6 +14,9 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, RoomMessageEventContent, SyncRoomMessageEvent,
 };
 use matrix_sdk::ruma::events::Mentions;
+use matrix_sdk::ruma::events::call::invite::SyncCallInviteEvent;
+use matrix_sdk::ruma::events::call::candidates::SyncCallCandidatesEvent;
+use matrix_sdk::ruma::events::call::hangup::SyncCallHangupEvent;
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId};
 use matrix_sdk::{Client as MatrixSdkClient, Room as MatrixSdkRoom, SessionMeta, SessionTokens};
 use serde::Deserialize;
@@ -977,6 +980,108 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
         }
     });
 
+    // ── Call event handlers ──────────────────────────────────
+    // Forward decrypted m.call.* events to voice-rtc sidecar.
+    // These are room-timeline events. When E2EE is active, only
+    // the SDK can decrypt them — voice-rtc cannot decrypt them
+    // independently. We forward the decrypted content via HTTP.
+
+    let call_state = app_state.clone();
+    client.add_event_handler(move |ev: SyncCallInviteEvent, room: MatrixSdkRoom| {
+        let state = call_state.clone();
+        async move {
+            let SyncCallInviteEvent::Original(ev) = ev else { return; };
+            let sender = ev.sender.to_string();
+            if sender.eq_ignore_ascii_case(&state.config.bot_username) { return; }
+            let room_id = room.room_id().to_string();
+            let call_id = ev.content.call_id.clone();
+            let body = serde_json::json!({
+                "type": "m.call.invite",
+                "room_id": room_id,
+                "sender": sender,
+                "content": {
+                    "call_id": call_id,
+                    "offer": {
+                        "type": ev.content.offer.session_type,
+                        "sdp": ev.content.offer.sdp,
+                    },
+                    "version": ev.content.version,
+                },
+            });
+            if let Err(e) = reqwest::Client::new()
+                .post("http://localhost:8081/api/call/event")
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                warn!("Failed to forward m.call.invite {call_id} to voice-rtc: {e}");
+            }
+        }
+    });
+
+    let cs_state = app_state.clone();
+    client.add_event_handler(move |ev: SyncCallCandidatesEvent, room: MatrixSdkRoom| {
+        let state = cs_state.clone();
+        async move {
+            let SyncCallCandidatesEvent::Original(ev) = ev else { return; };
+            let sender = ev.sender.to_string();
+            if sender.eq_ignore_ascii_case(&state.config.bot_username) { return; }
+            let room_id = room.room_id().to_string();
+            let body = serde_json::json!({
+                "type": "m.call.candidates",
+                "room_id": room_id,
+                "sender": sender,
+                "content": {
+                    "call_id": ev.content.call_id,
+                    "candidates": ev.content.candidates.iter().map(|c| serde_json::json!({
+                        "candidate": c.candidate,
+                        "sdpMid": c.sdp_mid,
+                        "sdpMLineIndex": c.sdp_m_line_index,
+                    })).collect::<Vec<_>>(),
+                },
+            });
+            if let Err(e) = reqwest::Client::new()
+                .post("http://localhost:8081/api/call/event")
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                warn!("Failed to forward m.call.candidates to voice-rtc: {e}");
+            }
+        }
+    });
+
+    let ch_state = app_state.clone();
+    client.add_event_handler(move |ev: SyncCallHangupEvent, room: MatrixSdkRoom| {
+        let state = ch_state.clone();
+        async move {
+            let SyncCallHangupEvent::Original(ev) = ev else { return; };
+            let sender = ev.sender.to_string();
+            if sender.eq_ignore_ascii_case(&state.config.bot_username) { return; }
+            let room_id = room.room_id().to_string();
+            let body = serde_json::json!({
+                "type": "m.call.hangup",
+                "room_id": room_id,
+                "sender": sender,
+                "content": {
+                    "call_id": ev.content.call_id,
+                    "reason": ev.content.reason,
+                },
+            });
+            if let Err(e) = reqwest::Client::new()
+                .post("http://localhost:8081/api/call/event")
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                warn!("Failed to forward m.call.hangup to voice-rtc: {e}");
+            }
+        }
+    });
+
     loop {
         let settings = || {
             MatrixSyncSettings::default()
@@ -1153,33 +1258,10 @@ async fn sync_matrix_messages(
                     key,
                     event_time_ms: event.get("origin_server_ts").and_then(|v| v.as_i64()),
                 });
-            } else if event_type.starts_with("m.call.") {
-                // Forward call events to voice-rtc sidecar for WebRTC handling.
-                if let Some(content) = event.get("content") {
-                    let room_id_owned = room_id.clone();
-                    let sender_owned = sender.clone();
-                    let event_type_owned = event_type.to_string();
-                    let content_owned = content.clone();
-                    tokio::spawn(async move {
-                        let body = serde_json::json!({
-                            "type": event_type_owned,
-                            "room_id": room_id_owned,
-                            "sender": sender_owned,
-                            "content": content_owned,
-                        });
-                        let url = "http://localhost:8081/api/call/event";
-                        if let Err(e) = reqwest::Client::new()
-                            .post(url)
-                            .json(&body)
-                            .timeout(Duration::from_secs(5))
-                            .send()
-                            .await
-                        {
-                            warn!("Failed to forward call event to voice-rtc: {e}");
-                        }
-                    });
-                }
             }
+            // NOTE: m.call.* events are now forwarded via SDK event handlers
+            // in start_matrix_e2ee_sync(), not here. This raw JSON path does not
+            // receive decrypted events when E2EE is active.
         }
     }
 
