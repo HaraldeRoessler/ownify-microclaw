@@ -2765,7 +2765,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "microclaw"
-version = "0.1.57"
+version = "0.1.59"
 dependencies = [
  "aes",
  "agent-client-protocol",
