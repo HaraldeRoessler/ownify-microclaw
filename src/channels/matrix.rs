@@ -17,6 +17,7 @@ use matrix_sdk::ruma::events::Mentions;
 use matrix_sdk::ruma::events::call::invite::SyncCallInviteEvent;
 use matrix_sdk::ruma::events::call::candidates::SyncCallCandidatesEvent;
 use matrix_sdk::ruma::events::call::hangup::SyncCallHangupEvent;
+use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId};
 use matrix_sdk::{Client as MatrixSdkClient, Room as MatrixSdkRoom, SessionMeta, SessionTokens};
 use serde::Deserialize;
@@ -1078,6 +1079,109 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
                 .await
             {
                 warn!("Failed to forward m.call.hangup to voice-rtc: {e}");
+            }
+        }
+    });
+
+    // ── Encrypted m.call.* fallback ─────────────────────────
+    // matrix-sdk 0.16 does NOT auto-decrypt-and-redispatch m.call.*
+    // events when they arrive as Megolm-encrypted m.room.encrypted
+    // wrappers (which is what modern Element/SchildiChat sends). The
+    // typed SyncCallInviteEvent / SyncCallCandidatesEvent /
+    // SyncCallHangupEvent handlers above therefore never fire for
+    // such calls, and the bot rings forever.
+    //
+    // This handler subscribes to the raw m.room.encrypted event
+    // and uses the SDK's Room::decrypt_event() to manually decrypt
+    // it. If the inner decrypted type is m.call.invite /
+    // m.call.candidates / m.call.hangup, forward to voice-rtc
+    // using the same JSON shape as the typed handlers above.
+    //
+    // For unencrypted m.call.* events the typed handlers above
+    // still fire and do the work — this fallback only runs when
+    // the typed handler cannot (i.e. the event came in encrypted).
+    let enc_state = app_state.clone();
+    client.add_event_handler(move |ev: OriginalSyncRoomEncryptedEvent, room: MatrixSdkRoom| {
+        let state = enc_state.clone();
+        async move {
+            // Only Megolm events can contain a m.call.invite; skip the rest fast.
+            let scheme = match &ev.content.scheme {
+                matrix_sdk::ruma::events::room::encrypted::EncryptedEventScheme::MegolmV1AesSha2(s) => s,
+                _ => return,
+            };
+            if scheme.session_id.is_empty() {
+                return;
+            }
+
+            // Ask the SDK to decrypt this encrypted event using the
+            // Olm machine. On success we get a TimelineEvent whose
+            // .kind is Decrypted(DecryptedRoomEvent { event: Raw<AnyTimelineEvent>, ... }).
+            let decrypted = match room.decrypt_event(&ev.into_raw(), None).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::debug!(
+                        "matrix m.call.* fallback: decrypt_event failed (likely no room key yet): {e}"
+                    );
+                    return;
+                }
+            };
+
+            let raw_event = match &decrypted.kind {
+                matrix_sdk::ruma::events::TimelineEventKind::Decrypted(_) => {
+                    use matrix_sdk::ruma::serde::RawExt;
+                    // .raw() returns &Raw<AnySyncTimelineEvent> for TimelineEvent
+                    let raw = decrypted.kind.raw();
+                    let value: serde_json::Value = match raw.deserialize_as() {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+                    value
+                }
+                _ => return, // UnableToDecrypt or PlainText — not interesting
+            };
+
+            let event_type = raw_event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if !event_type.starts_with("m.call.") {
+                return; // not a call event — leave to other handlers (e.g. m.room.message)
+            }
+
+            let sender = raw_event
+                .get("sender")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if sender.eq_ignore_ascii_case(&state.config.bot_username) {
+                return; // ignore calls from the bot itself
+            }
+            let room_id = room.room_id().to_string();
+            let content = raw_event.get("content").cloned().unwrap_or(serde_json::json!({}));
+
+            // Strip `sender` from the inner content (voice-rtc gets it at the top level).
+            let mut content_value = content;
+            if let Some(obj) = content_value.as_object_mut() {
+                obj.remove("sender");
+            }
+
+            let body = serde_json::json!({
+                "type": event_type,
+                "room_id": room_id,
+                "sender": sender,
+                "content": content_value,
+            });
+
+            if let Err(e) = reqwest::Client::new()
+                .post("http://localhost:8081/api/call/event")
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                warn!("Failed to forward encrypted {event_type} to voice-rtc: {e}");
+            } else {
+                info!(
+                    "Forwarded encrypted {event_type} to voice-rtc (call_id={})",
+                    content_value.get("call_id").and_then(|v| v.as_str()).unwrap_or("?")
+                );
             }
         }
     });
