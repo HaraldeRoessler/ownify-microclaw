@@ -992,6 +992,12 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
         async move {
             let SyncCallInviteEvent::Original(ev) = ev else { return; };
             let sender = ev.sender.to_string();
+            tracing::info!(
+                "m.call.invite handler fired: sender={} call_id={} sdp_len={}",
+                sender,
+                ev.content.call_id,
+                ev.content.offer.sdp.len()
+            );
             if sender.eq_ignore_ascii_case(&state.config.bot_username) { return; }
             let room_id = room.room_id().to_string();
             let call_id = ev.content.call_id.clone();
