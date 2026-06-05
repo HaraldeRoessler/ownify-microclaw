@@ -73,14 +73,16 @@ pub async fn handle_transcript(
         caller_channel: "matrix-voice",
         chat_id,
         chat_type: "direct",
-        // Allow ONLY the voice_speak tool — no bash, no file ops, no
-        // investigation. The voice_speak call is what dispatches the
-        // agent's reply to voice-rtc for TTS playback.
-        allowed_tools: Some(&["voice_speak"]),
+        // No tool restriction — the prompt tells the agent to call
+        // voice_speak with a short reply, and to use memory tools
+        // (ownify_search, memory_search) when relevant. We trust
+        // the prompt rather than blocking tools, because the user
+        // wants the agent to actually access its memory during calls.
+        allowed_tools: None,
     };
 
     let prompt = format!(
-        "[Voice Call from {} in call_id={} — You MUST use the voice_speak tool to respond (passing call_id and your short reply text). Keep replies to 1-3 short sentences. Do NOT just output text — call voice_speak with the text.]: {}",
+        "[Voice Call from {} in call_id={} — To respond: call the voice_speak tool with call_id and a short reply (1-3 sentences in the user's language). You CAN and SHOULD use memory tools (ownify_search, memory_search, structured_memory_search) to recall relevant context before answering. Do NOT just output text — always call voice_speak with the text.]: {}",
         req.sender, req.call_id, req.text
     );
 
