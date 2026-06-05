@@ -73,15 +73,15 @@ pub async fn handle_transcript(
         caller_channel: "matrix-voice",
         chat_id,
         chat_type: "direct",
-        // Disable all tool use for voice calls so the agent responds
-        // immediately with text instead of going on debug/investigation
-        // loops that delay the reply past the call hangup.
-        allowed_tools: Some(&[]),
+        // Allow ONLY the voice_speak tool — no bash, no file ops, no
+        // investigation. The voice_speak call is what dispatches the
+        // agent's reply to voice-rtc for TTS playback.
+        allowed_tools: Some(&["voice_speak"]),
     };
 
     let prompt = format!(
-        "[Voice Call from {} — respond in a few short sentences, do not call any tools]: {}",
-        req.sender, req.text
+        "[Voice Call from {} in call_id={} — You MUST use the voice_speak tool to respond (passing call_id and your short reply text). Keep replies to 1-3 short sentences. Do NOT just output text — call voice_speak with the text.]: {}",
+        req.sender, req.call_id, req.text
     );
 
     let result = process_with_agent(
