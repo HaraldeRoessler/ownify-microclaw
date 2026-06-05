@@ -73,10 +73,16 @@ pub async fn handle_transcript(
         caller_channel: "matrix-voice",
         chat_id,
         chat_type: "direct",
-        allowed_tools: None,
+        // Disable all tool use for voice calls so the agent responds
+        // immediately with text instead of going on debug/investigation
+        // loops that delay the reply past the call hangup.
+        allowed_tools: Some(&[]),
     };
 
-    let prompt = format!("[Voice Call from {}]: {}", req.sender, req.text);
+    let prompt = format!(
+        "[Voice Call from {} — respond in a few short sentences, do not call any tools]: {}",
+        req.sender, req.text
+    );
 
     let result = process_with_agent(
         &state,
