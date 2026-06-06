@@ -254,6 +254,12 @@ fn default_voice_provider() -> String {
 pub fn default_voice_rtc_url() -> String {
     "ws://localhost:8080".into()
 }
+pub fn default_voice_health_url() -> String {
+    "http://localhost:8081".into()
+}
+pub fn default_image_size() -> String {
+    "1024x1024".into()
+}
 pub fn default_voice_rtc_health_url() -> String {
     "http://localhost:8081".into()
 }
@@ -810,6 +816,26 @@ pub struct Config {
     #[serde(default = "default_voice_rtc_health_url")]
     pub voice_rtc_health_url: String,
 
+    // --- Image generation (W3, 2026-06-05) ---
+    /// Image generation provider name (e.g. "openrouter", "openai", "together").
+    /// When unset, the image_gen tool returns a friendly error.
+    #[serde(default)]
+    pub image_provider: String,
+    /// API key for the image gen provider. Read from IMAGE_API_KEY env var.
+    #[serde(default)]
+    pub image_api_key: String,
+    /// Base URL of the image gen endpoint (e.g. "https://openrouter.ai/api/v1").
+    /// Read from IMAGE_API_URL env var.
+    #[serde(default)]
+    pub image_api_url: String,
+    /// Default image model to use. Read from IMAGE_MODEL env var.
+    /// (Tools may override per-call.)
+    #[serde(default)]
+    pub image_model: String,
+    /// Default image size, e.g. "1024x1024". Read from IMAGE_DEFAULT_SIZE env var.
+    #[serde(default = "default_image_size")]
+    pub image_default_size: String,
+
     // --- Observability ---
     #[serde(default)]
     pub observability: Option<serde_yaml::Value>,
@@ -1275,6 +1301,12 @@ impl Config {
             voice_transcription_command: None,
             voice_rtc_url: default_voice_rtc_url(),
             voice_rtc_health_url: default_voice_rtc_health_url(),
+            image_provider: std::env::var("IMAGE_PROVIDER").unwrap_or_default(),
+            image_api_key: std::env::var("IMAGE_API_KEY").unwrap_or_default(),
+            image_api_url: std::env::var("IMAGE_API_URL").unwrap_or_default(),
+            image_model: std::env::var("IMAGE_MODEL").unwrap_or_default(),
+            image_default_size: std::env::var("IMAGE_DEFAULT_SIZE")
+                .unwrap_or_else(|_| default_image_size()),
             observability: None,
             channels: HashMap::new(),
             chat_turn_queue_max_pending: 20,
