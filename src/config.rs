@@ -1490,6 +1490,36 @@ impl Config {
 
     /// Apply post-deserialization normalization and validation.
     pub(crate) fn post_deserialize(&mut self) -> Result<(), MicroClawError> {
+        // Env-var override for image generation. We do this first so that
+        // K8s-deployed env vars (set via ownify-skill-credentials-<slug>
+        // Secret) always take precedence over YAML values, even if the YAML
+        // has stale or empty image_* fields.
+        if let Ok(v) = std::env::var("IMAGE_PROVIDER") {
+            if !v.trim().is_empty() {
+                self.image_provider = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_API_KEY") {
+            if !v.trim().is_empty() {
+                self.image_api_key = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_API_URL") {
+            if !v.trim().is_empty() {
+                self.image_api_url = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_MODEL") {
+            if !v.trim().is_empty() {
+                self.image_model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_DEFAULT_SIZE") {
+            if !v.trim().is_empty() {
+                self.image_default_size = v;
+            }
+        }
+
         self.llm_provider = self.llm_provider.trim().to_lowercase();
 
         self.model = resolve_model_name_with_fallback(&self.llm_provider, Some(&self.model), None);
