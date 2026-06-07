@@ -6,6 +6,7 @@ pub mod edit_file;
 pub mod export_chat;
 pub mod glob;
 pub mod grep;
+pub mod image_gen;
 pub mod knowledge_graph;
 pub mod mcp;
 pub mod memory;
@@ -273,6 +274,7 @@ impl ToolRegistry {
             Box::new(voice::VoiceSpeakTool::new(config)),
             Box::new(voice::VoiceHangupTool::new(config)),
             Box::new(voice::VoiceStatusTool::new(config)),
+            Box::new(image_gen::ImageGenTool::new(config)),
         ];
 
         // Add ClawHub tools if enabled

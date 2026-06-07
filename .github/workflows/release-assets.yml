@@ -182,6 +182,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Build release binary
         shell: bash
@@ -308,8 +310,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          username: haralderoessler
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Log in to Docker Hub
         if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
