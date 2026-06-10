@@ -7,7 +7,7 @@ use crate::agent_engine::is_slash_command_text;
 use crate::embedding::EmbeddingProvider;
 use crate::memory_backend::MemoryBackend;
 use crate::runtime::AppState;
-use microclaw_storage::db::{call_blocking, Database, Memory};
+use microclaw_storage::db::{call_blocking, Database, KgTriple, Memory};
 use microclaw_storage::memory_quality;
 
 pub(crate) struct ReflectorApplyOutcome {
@@ -30,7 +30,7 @@ fn jaccard_similarity_ratio(a: &str, b: &str) -> f64 {
     }
 }
 
-fn tokenize_for_relevance(text: &str) -> std::collections::HashSet<String> {
+pub(crate) fn tokenize_for_relevance(text: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
 
     for token in text
@@ -97,6 +97,48 @@ pub(crate) fn jaccard_similar(a: &str, b: &str, threshold: f64) -> bool {
         return true;
     }
     intersection as f64 / union as f64 >= threshold
+}
+
+/// A minimal view of a memory for sleep-time consolidation.
+#[derive(Debug, Clone)]
+pub(crate) struct ConsolidationItem {
+    pub id: i64,
+    pub content: String,
+    pub category: String,
+}
+
+/// Select near-duplicate memories to archive during a sleep-time consolidation pass.
+///
+/// `items` must be pre-sorted **best-first** (e.g. highest confidence / most recent
+/// first): the first member of each duplicate group is kept and later same-category
+/// near-duplicates are archived. PROFILE memories are always kept (they describe the
+/// user's identity). Returns the ids to archive, capped at `max`.
+pub(crate) fn select_duplicate_memories_to_archive(
+    items: &[ConsolidationItem],
+    threshold: f64,
+    max: usize,
+) -> Vec<i64> {
+    let threshold = threshold.clamp(0.5, 1.0);
+    let mut kept: Vec<&ConsolidationItem> = Vec::new();
+    let mut archive: Vec<i64> = Vec::new();
+    for it in items {
+        if it.category == "PROFILE" {
+            kept.push(it);
+            continue;
+        }
+        let is_dup = kept.iter().any(|k| {
+            k.category == it.category && jaccard_similar(&k.content, &it.content, threshold)
+        });
+        if is_dup {
+            archive.push(it.id);
+            if archive.len() >= max {
+                break;
+            }
+        } else {
+            kept.push(it);
+        }
+    }
+    archive
 }
 
 fn should_merge_duplicate(
@@ -297,6 +339,29 @@ pub(crate) async fn maybe_handle_explicit_memory_command(
 /// AI agents sometimes prepend system prompts or tool definitions to user messages,
 /// which destroys embedding quality for semantic search. This sanitizer extracts the
 /// likely user intent by:
+/// Effective ranking score for a memory: `confidence` × recency-decay.
+/// PROFILE memories are exempted (they describe the user, not transient state)
+/// and a non-positive `half_life_days` disables decay entirely.
+fn effective_memory_score(
+    m: &Memory,
+    now: chrono::DateTime<chrono::Utc>,
+    half_life_days: f64,
+) -> f64 {
+    if m.category == "PROFILE" || half_life_days <= 0.0 {
+        return m.confidence;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(&m.last_seen_at)
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(&m.updated_at));
+    let last_seen = match parsed {
+        Ok(t) => t.with_timezone(&chrono::Utc),
+        Err(_) => return m.confidence,
+    };
+    let age_days =
+        (now - last_seen).num_seconds().max(0) as f64 / 86_400.0;
+    let decay = 0.5_f64.powf(age_days / half_life_days);
+    m.confidence * decay
+}
+
 /// 1. Detecting and stripping common system prompt patterns
 /// 2. Extracting the last meaningful sentence (most likely to be the actual query)
 /// 3. Truncating overly long queries that are likely contaminated
@@ -353,6 +418,55 @@ fn sanitize_memory_query(raw: &str) -> String {
     trimmed[start..].to_string()
 }
 
+/// Find which knowledge-graph entities a query mentions, to seed graph-augmented
+/// retrieval. Uses case-insensitive substring matching (so multi-word entities
+/// like "New York" are caught), prefers longer entities first (`entities` is
+/// pre-sorted longest-first by the storage layer), and ignores 1-2 char entities
+/// to avoid noise. Bounded to `max_seeds`.
+fn extract_kg_seeds(query: &str, entities: &[String], max_seeds: usize) -> Vec<String> {
+    let q = query.to_lowercase();
+    if q.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut seeds: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for ent in entities {
+        if seeds.len() >= max_seeds {
+            break;
+        }
+        let lc = ent.to_lowercase();
+        if lc.chars().count() < 3 {
+            continue;
+        }
+        if q.contains(&lc) && seen.insert(lc) {
+            seeds.push(ent.clone());
+        }
+    }
+    seeds
+}
+
+/// Render a connected-facts block from graph-expanded triples, skipping triples
+/// whose meaning is already covered by an injected memory line so the block adds
+/// genuinely new, multi-hop context rather than repeating L0-L2.
+fn render_graph_section(triples: &[KgTriple], already_injected: &str) -> String {
+    let injected_lc = already_injected.to_lowercase();
+    let mut lines = String::new();
+    for t in triples {
+        // Cheap redundancy guard: if both endpoints already appear together in an
+        // injected memory line, the relationship is probably already stated.
+        let subj_lc = t.subject.to_lowercase();
+        let obj_lc = t.object.to_lowercase();
+        if injected_lc.contains(&subj_lc) && injected_lc.contains(&obj_lc) {
+            continue;
+        }
+        lines.push_str(&format!(
+            "{} —[{}]→ {}\n",
+            t.subject, t.predicate, t.object
+        ));
+    }
+    lines
+}
+
 /// Build structured memory context using a 4-layer memory stack:
 ///
 /// - **L0 (Identity)**: PROFILE memories — always loaded first. These define who the user is.
@@ -363,6 +477,9 @@ fn sanitize_memory_query(raw: &str) -> String {
 /// - **L2 (Relevance)**: Query-relevant memories via semantic/keyword ranking.
 ///   Loaded based on what the user is currently asking about.
 ///   Budget: remaining tokens. Cost: variable.
+/// - **Connected**: Graph-augmented facts reached by expanding the temporal
+///   knowledge graph from entities the query mentions (1-2 hops). Surfaces
+///   multi-hop context the flat memory layers miss. Bounded and query-gated.
 /// - **L3 (Deep Search)**: Not injected here — available via `structured_memory_search` tool
 ///   for on-demand deep retrieval when the agent needs more context.
 #[expect(clippy::too_many_arguments)]
@@ -375,6 +492,10 @@ pub(crate) async fn build_db_memory_context(
     token_budget: usize,
     l0_identity_pct: usize,
     l1_essential_pct: usize,
+    recency_half_life_days: f64,
+    graph_recall_enabled: bool,
+    graph_max_hops: usize,
+    graph_max_triples: usize,
 ) -> String {
     let query = &sanitize_memory_query(query);
     let memories = match memory_backend.get_memories_for_context(chat_id, 100).await {
@@ -423,15 +544,18 @@ pub(crate) async fn build_db_memory_context(
 
     // ── L1: Essential Story (highest-confidence memories, up to l1_pct% of budget) ──
     let l1_budget = used_tokens + (budget * l1_pct / 100);
+    let now = chrono::Utc::now();
     let mut essential: Vec<&Memory> = memories
         .iter()
         .filter(|m| !m.is_archived && !injected_ids.contains(&m.id))
         .collect();
-    // Score by confidence + recency (higher = more essential)
+    // Score by confidence × recency-decay (PROFILE memories don't decay; everyone
+    // else loses half their weight per `recency_half_life_days`). The decay
+    // pulls stale tactical facts down so durable knowledge floats.
     essential.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let sa = effective_memory_score(a, now, recency_half_life_days);
+        let sb = effective_memory_score(b, now, recency_half_life_days);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut l1_count = 0usize;
@@ -550,6 +674,38 @@ pub(crate) async fn build_db_memory_context(
         let _ = l2_count;
     }
 
+    // ── Connected: graph-augmented retrieval over the temporal knowledge graph ──
+    // Seed from entities the query mentions, expand a couple of hops over the KG,
+    // and surface connected facts the flat L0-L2 layers miss (multi-hop context).
+    // Local-only: no embeddings, no LLM, bounded by triple count and token budget.
+    if graph_recall_enabled && graph_max_triples > 0 && !query.trim().is_empty() {
+        let q = query.to_string();
+        let entities = call_blocking(db.clone(), move |d| {
+            d.kg_distinct_entities(Some(chat_id), 500)
+        })
+        .await
+        .unwrap_or_default();
+        let seeds = extract_kg_seeds(&q, &entities, 8);
+        if !seeds.is_empty() {
+            let hops = graph_max_hops.clamp(1, 3);
+            let max_triples = graph_max_triples;
+            let triples = call_blocking(db.clone(), move |d| {
+                d.kg_neighborhood(Some(chat_id), &seeds, hops, max_triples)
+            })
+            .await
+            .unwrap_or_default();
+            if !triples.is_empty() {
+                let section = render_graph_section(&triples, &out);
+                let est = (section.len() / 4) + 12;
+                if !section.trim().is_empty() && used_tokens + est <= budget {
+                    out.push_str("# Connected\n");
+                    out.push_str(&section);
+                    used_tokens += est;
+                }
+            }
+        }
+    }
+
     out.push_str("</structured_memories>\n");
 
     let candidate_count = memories.len();
@@ -621,6 +777,12 @@ pub(crate) async fn apply_reflector_extractions(
             Some(c) => c,
             None => continue,
         };
+        // Strip credentials / PII before the row is persisted, deduped by
+        // topic key, or shipped to the embedding model. Reflector-extracted
+        // memories quote conversation content verbatim; without this gate a
+        // user pasting an API key into chat would land that key in
+        // long-lived memory and any downstream embedding store.
+        let content = microclaw_core::redact::redact(&content);
         if should_skip_memory_poisoning_risk(&content) {
             skipped += 1;
             continue;
@@ -784,4 +946,175 @@ pub(crate) async fn apply_reflector_extractions(
 #[cfg(feature = "sqlite-vec")]
 pub(crate) fn memory_supports_local_semantic_ranking(memory_backend: &MemoryBackend) -> bool {
     memory_backend.supports_local_semantic_ranking()
+}
+
+#[cfg(test)]
+mod recency_tests {
+    use super::effective_memory_score;
+    use microclaw_storage::db::Memory;
+
+    fn mk(category: &str, last_seen: &str, confidence: f64) -> Memory {
+        Memory {
+            id: 1,
+            chat_id: Some(1),
+            content: "x".into(),
+            category: category.into(),
+            created_at: last_seen.into(),
+            updated_at: last_seen.into(),
+            embedding_model: None,
+            confidence,
+            source: "test".into(),
+            last_seen_at: last_seen.into(),
+            is_archived: false,
+            archived_at: None,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn profile_memories_are_immune_to_decay() {
+        let now = chrono::Utc::now();
+        let stale = (now - chrono::Duration::days(365)).to_rfc3339();
+        let m = mk("PROFILE", &stale, 0.9);
+        assert!((effective_memory_score(&m, now, 30.0) - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn knowledge_memories_decay_by_half_per_half_life() {
+        let now = chrono::Utc::now();
+        let half_life = 30.0;
+        let one_half = (now - chrono::Duration::days(30)).to_rfc3339();
+        let m = mk("KNOWLEDGE", &one_half, 1.0);
+        let s = effective_memory_score(&m, now, half_life);
+        assert!((s - 0.5).abs() < 0.01, "expected ~0.5, got {s}");
+    }
+
+    #[test]
+    fn zero_half_life_disables_decay() {
+        let now = chrono::Utc::now();
+        let stale = (now - chrono::Duration::days(365)).to_rfc3339();
+        let m = mk("EVENT", &stale, 0.7);
+        assert!((effective_memory_score(&m, now, 0.0) - 0.7).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod consolidation_tests {
+    use super::{select_duplicate_memories_to_archive, ConsolidationItem};
+
+    fn item(id: i64, content: &str, category: &str) -> ConsolidationItem {
+        ConsolidationItem {
+            id,
+            content: content.into(),
+            category: category.into(),
+        }
+    }
+
+    #[test]
+    fn archives_near_duplicate_keeping_first() {
+        let items = vec![
+            item(1, "user prefers concise replies and bullet points", "KNOWLEDGE"),
+            item(2, "user prefers concise replies and bullet points please", "KNOWLEDGE"),
+            item(3, "user lives in Berlin", "KNOWLEDGE"),
+        ];
+        let archived = select_duplicate_memories_to_archive(&items, 0.7, 20);
+        assert_eq!(archived, vec![2], "only the later near-duplicate is archived");
+    }
+
+    #[test]
+    fn never_archives_profile() {
+        let items = vec![
+            item(1, "name is Alex", "PROFILE"),
+            item(2, "name is Alex", "PROFILE"),
+        ];
+        let archived = select_duplicate_memories_to_archive(&items, 0.7, 20);
+        assert!(archived.is_empty(), "PROFILE memories are always kept");
+    }
+
+    #[test]
+    fn different_categories_are_not_duplicates() {
+        let items = vec![
+            item(1, "shipping the release today", "EVENT"),
+            item(2, "shipping the release today", "KNOWLEDGE"),
+        ];
+        let archived = select_duplicate_memories_to_archive(&items, 0.7, 20);
+        assert!(archived.is_empty());
+    }
+
+    #[test]
+    fn respects_max_cap() {
+        let items = vec![
+            item(1, "alpha beta gamma delta", "KNOWLEDGE"),
+            item(2, "alpha beta gamma delta", "KNOWLEDGE"),
+            item(3, "alpha beta gamma delta", "KNOWLEDGE"),
+        ];
+        let archived = select_duplicate_memories_to_archive(&items, 0.7, 1);
+        assert_eq!(archived.len(), 1, "cap limits archives per pass");
+    }
+
+    #[test]
+    fn distinct_memories_are_kept() {
+        let items = vec![
+            item(1, "user is a rust developer", "KNOWLEDGE"),
+            item(2, "user enjoys hiking on weekends", "KNOWLEDGE"),
+        ];
+        let archived = select_duplicate_memories_to_archive(&items, 0.82, 20);
+        assert!(archived.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod graph_recall_tests {
+    use super::{extract_kg_seeds, render_graph_section};
+    use microclaw_storage::db::KgTriple;
+
+    fn triple(subject: &str, predicate: &str, object: &str) -> KgTriple {
+        KgTriple {
+            id: 1,
+            subject: subject.into(),
+            predicate: predicate.into(),
+            object: object.into(),
+            chat_id: Some(1),
+            valid_from: "2026-01-01T00:00:00Z".into(),
+            valid_to: None,
+            confidence: 0.9,
+            source: "test".into(),
+            source_memory_id: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn seeds_match_multiword_entities_case_insensitively() {
+        let entities = vec![
+            "New York".to_string(),
+            "Acme".to_string(),
+            "Go".to_string(), // too short → ignored
+        ];
+        let seeds = extract_kg_seeds("Does acme still have an office in new york?", &entities, 8);
+        assert!(seeds.contains(&"New York".to_string()));
+        assert!(seeds.contains(&"Acme".to_string()));
+        assert!(!seeds.iter().any(|s| s == "Go"));
+    }
+
+    #[test]
+    fn empty_query_yields_no_seeds() {
+        let entities = vec!["Acme".to_string()];
+        assert!(extract_kg_seeds("   ", &entities, 8).is_empty());
+    }
+
+    #[test]
+    fn graph_section_skips_already_stated_relationships() {
+        let triples = vec![
+            triple("Acme", "located_in", "Berlin"),
+            triple("Bob", "manages", "Acme"),
+        ];
+        // The first relationship is already spelled out in an injected memory; the
+        // second (Bob→Acme) is new and should survive.
+        let injected = "[KNOWLEDGE] [chat] Acme is located_in Berlin\n";
+        let section = render_graph_section(&triples, injected);
+        assert!(!section.contains("Berlin"));
+        assert!(section.contains("Bob"));
+        assert!(section.contains("Acme"));
+    }
 }

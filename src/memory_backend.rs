@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::mcp::{McpManager, McpServer, McpToolInfo};
 use microclaw_core::error::MicroClawError;
+use microclaw_core::text::floor_char_boundary;
 use microclaw_storage::db::{call_blocking, Database, Memory};
 
 #[derive(Clone)]
@@ -356,7 +357,7 @@ impl MemoryBackend {
                     "source": source,
                     "confidence": confidence,
                     "content_len": content.len(),
-                    "content_preview": &content[..content.len().min(100)],
+                    "content_preview": &content[..floor_char_boundary(content, 100)],
                     "ts": chrono::Utc::now().to_rfc3339(),
                 }),
             );
@@ -1269,6 +1270,10 @@ fn parse_single_memory_strict(value: &serde_json::Value) -> Result<Memory, Strin
             .get("archived_at")
             .and_then(|v| v.as_str())
             .map(|v| v.to_string()),
+        expires_at: obj
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string()),
     })
 }
 
@@ -1317,6 +1322,7 @@ mod tests {
             last_seen_at: "2026-03-10T00:00:00Z".to_string(),
             is_archived: false,
             archived_at: None,
+            expires_at: None,
         }
     }
 

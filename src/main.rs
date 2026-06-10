@@ -4,7 +4,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use microclaw::config::Config;
 use microclaw::error::MicroClawError;
 use microclaw::{
-    builtin_skills, db, doctor, gateway, hooks, logging, mcp, memory, runtime, setup, skills,
+    builtin_skills, db, doctor, eval, gateway, hooks, logging, mcp, memory, runtime, setup, skills,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -22,14 +22,31 @@ const LONG_ABOUT: &str = concat!(
     "\x1b[1mQuick Start:\x1b[22m\n",
     "  1) microclaw setup\n",
     "  2) microclaw doctor\n",
-    "  3) microclaw start",
+    "  3) microclaw start\n",
+    "\n",
+    "Once running, send \x1b[1m/help\x1b[22m in any chat to list the in-chat commands.",
+);
+
+const EXAMPLES: &str = concat!(
+    "\x1b[1mExamples:\x1b[22m\n",
+    "  microclaw setup                 Create or edit microclaw.config.yaml\n",
+    "  microclaw doctor                Run preflight checks\n",
+    "  microclaw doctor --online       Also test your API key/model with a live request\n",
+    "  microclaw start                 Start the bot on the enabled channels\n",
+    "  microclaw skill audit           Audit local skills (duplicates, stale, thin)\n",
+    "  microclaw audit verify          Verify the tamper-evident audit log\n",
+    "  microclaw eval <file|dir>       Evaluate recorded session trajectories\n",
+    "\n",
+    "Run 'microclaw <command> --help' for command-specific options.",
 );
 
 #[derive(Debug, Parser)]
 #[command(
     name = "microclaw",
     version = VERSION,
-    about = LONG_ABOUT
+    about = LONG_ABOUT,
+    after_help = EXAMPLES,
+    after_long_help = EXAMPLES,
 )]
 struct Cli {
     /// Explicit config file path (absolute or relative)
@@ -48,7 +65,9 @@ enum MainCommand {
     /// Full-screen setup wizard (or `setup --enable-sandbox`)
     Setup(SetupCommand),
     /// Preflight diagnostics
+    #[command(disable_help_flag = true)]
     Doctor {
+        /// Use `microclaw doctor --help` for options and examples.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -71,12 +90,66 @@ enum MainCommand {
     Weixin(WeixinCommand),
     /// Manage Web UI configurations
     Web(WebCommand),
+    /// Evaluate recorded session trajectories (CI gate; no LLM call)
+    Eval(EvalCommand),
+    /// Inspect and verify the tamper-evident audit log
+    Audit(AuditCommand),
     /// Re-embed active memories (requires `sqlite-vec` feature)
     Reembed,
     /// Upgrade MicroClaw to latest release
     Upgrade,
     /// Show version
     Version,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[22m\n  \
+    microclaw eval session.json                 Check one recorded session\n  \
+    microclaw eval docs/test/eval-fixtures      Check every fixture in a directory\n  \
+    microclaw eval fixtures --strict-tool-errors --json")]
+struct EvalCommand {
+    /// Path to a session fixture (.json) or a directory of fixtures
+    path: String,
+    /// Maximum allowed tool calls per session before flagging
+    #[arg(long, default_value_t = 100)]
+    max_tool_calls: usize,
+    /// Flag a stuck loop when the same tool + arguments is called this many times
+    #[arg(long, default_value_t = 3)]
+    max_repeats: usize,
+    /// Flag this many consecutive tool errors as a failure
+    #[arg(long, default_value_t = 3)]
+    max_error_streak: usize,
+    /// Treat tool errors in the trajectory as a failure
+    #[arg(long)]
+    strict_tool_errors: bool,
+    /// Emit a JSON report instead of human-readable text
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[22m\n  \
+    microclaw audit verify                 Check the audit log hasn't been tampered with\n  \
+    microclaw audit list --kind auth       Show recent auth events\n  \
+    microclaw audit list --limit 100")]
+struct AuditCommand {
+    #[command(subcommand)]
+    action: AuditAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditAction {
+    /// Verify the tamper-evident hash chain over the audit log
+    Verify,
+    /// List recent audit-log entries
+    List {
+        /// Filter by event kind (e.g. `auth`, `tool`, `hook`)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Maximum number of entries to show
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -496,6 +569,56 @@ fn apply_config_override(path: Option<&PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Handle `microclaw audit <verify|list>`. Returns the process exit code:
+/// 0 when the chain is intact (or for `list`), 1 when tampering is detected.
+fn handle_audit_cli(cmd: AuditCommand) -> anyhow::Result<i32> {
+    let config = Config::load()?;
+    let db = db::Database::new(&config.runtime_data_dir())?;
+    match cmd.action {
+        AuditAction::Verify => {
+            let status = db.verify_audit_chain()?;
+            if status.intact {
+                println!(
+                    "Audit chain intact: {} sealed entr{} verified.",
+                    status.sealed_entries,
+                    if status.sealed_entries == 1 { "y" } else { "ies" }
+                );
+                Ok(0)
+            } else {
+                eprintln!(
+                    "Audit chain BROKEN at entry id {}: {}",
+                    status.broken_at.unwrap_or(-1),
+                    status.reason.as_deref().unwrap_or("unknown"),
+                );
+                eprintln!("({} entr{} verified before the break)",
+                    status.sealed_entries.saturating_sub(1),
+                    if status.sealed_entries.saturating_sub(1) == 1 { "y" } else { "ies" });
+                Ok(1)
+            }
+        }
+        AuditAction::List { kind, limit } => {
+            let rows = db.list_audit_logs(kind.as_deref(), limit)?;
+            if rows.is_empty() {
+                println!("No audit-log entries.");
+            } else {
+                for r in &rows {
+                    println!(
+                        "[{}] {} {} {} {} target={} {}",
+                        r.created_at,
+                        r.kind,
+                        r.actor,
+                        r.action,
+                        r.status,
+                        r.target.as_deref().unwrap_or("-"),
+                        r.detail.as_deref().unwrap_or(""),
+                    );
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
 async fn reembed_memories() -> anyhow::Result<()> {
     let config = Config::load()?;
 
@@ -588,6 +711,11 @@ async fn main() -> anyhow::Result<()> {
                 let saved = setup::run_setup_wizard()?;
                 if saved {
                     println!("Setup saved to microclaw.config.yaml");
+                    println!();
+                    println!("Next steps:");
+                    println!("  1) microclaw doctor          # verify your setup");
+                    println!("     microclaw doctor --online # …and test the API key/model with a live request");
+                    println!("  2) microclaw start           # start the bot on the enabled channels");
                 } else {
                     println!("Setup canceled");
                 }
@@ -614,6 +742,20 @@ async fn main() -> anyhow::Result<()> {
         Some(MainCommand::Weixin(weixin)) => {
             handle_weixin_cli(weixin.action).await?;
             return Ok(());
+        }
+        Some(MainCommand::Eval(eval_args)) => {
+            let thresholds = eval::EvalThresholds {
+                max_tool_calls: eval_args.max_tool_calls,
+                strict_tool_errors: eval_args.strict_tool_errors,
+                max_repeats: eval_args.max_repeats,
+                max_error_streak: eval_args.max_error_streak,
+            };
+            let code = eval::run_eval(&eval_args.path, &thresholds, eval_args.json)?;
+            std::process::exit(code);
+        }
+        Some(MainCommand::Audit(audit_args)) => {
+            let code = handle_audit_cli(audit_args)?;
+            std::process::exit(code);
         }
         Some(MainCommand::Reembed) => {
             return reembed_memories().await;

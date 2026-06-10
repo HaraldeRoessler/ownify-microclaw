@@ -72,6 +72,28 @@ pub struct TaskRunLog {
     pub result_summary: Option<String>,
 }
 
+/// A row returned from the tool result cache lookup.
+#[derive(Debug, Clone)]
+pub struct CachedToolResult {
+    pub tool_name: String,
+    pub content: String,
+    pub is_error: bool,
+    pub metadata_json: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+/// Metadata for a stored tool-result artifact.
+#[derive(Debug, Clone)]
+pub struct ToolArtifactMeta {
+    pub artifact_id: String,
+    pub chat_id: i64,
+    pub tool_name: String,
+    pub total_chars: i64,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmUsageSummary {
     pub requests: i64,
@@ -104,6 +126,10 @@ pub struct Memory {
     pub last_seen_at: String,
     pub is_archived: bool,
     pub archived_at: Option<String>,
+    /// Optional RFC3339 timestamp at which this memory expires. NULL means
+    /// the memory is durable; expired rows are filtered from retrieval and
+    /// pruned by the reflector.
+    pub expires_at: Option<String>,
 }
 
 /// A single triple in the temporal knowledge graph.
@@ -208,7 +234,11 @@ pub struct AuditLogRecord {
 pub type SessionMetaRow = (String, String, Option<String>, Option<i64>);
 pub type SessionTreeRow = (i64, Option<String>, Option<i64>, String);
 
-const SCHEMA_VERSION_CURRENT: i64 = 20;
+const SCHEMA_VERSION_CURRENT: i64 = 27;
+
+/// Genesis link for the tamper-evident audit hash chain — the `prev_hash` of the
+/// first sealed entry.
+const AUDIT_GENESIS_HASH: &str = "GENESIS";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -262,6 +292,9 @@ pub struct SubagentRunRecord {
     pub model: String,
     pub token_budget: i64,
     pub artifact_json: Option<String>,
+    pub label: Option<String>,
+    pub progress_text: Option<String>,
+    pub last_progress_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +321,7 @@ pub struct CreateSubagentRunParams<'a> {
     pub context: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
+    pub label: Option<&'a str>,
 }
 
 pub struct FinishSubagentRunParams<'a> {
@@ -368,6 +402,9 @@ fn ensure_memory_schema(conn: &Connection) -> Result<(), MicroClawError> {
     }
     if !table_has_column(conn, "memories", "archived_at")? {
         conn.execute("ALTER TABLE memories ADD COLUMN archived_at TEXT", [])?;
+    }
+    if !table_has_column(conn, "memories", "expires_at")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN expires_at TEXT", [])?;
     }
     conn.execute(
         "UPDATE memories
@@ -901,10 +938,236 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
         set_schema_version(conn, 20)?;
         version = 20;
     }
+    if version < 21 {
+        // Session search: FTS5 virtual table over messages, with triggers to
+        // keep it in sync on INSERT/UPDATE/DELETE. The table is created as
+        // contentless (`content=''`) to avoid duplicating text on disk; we
+        // manually keep it in sync via triggers rather than rely on the
+        // external-content mode so that deletions of individual messages are
+        // still cleanly reflected.
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                content,
+                sender_name,
+                chat_id UNINDEXED,
+                message_id UNINDEXED,
+                timestamp UNINDEXED,
+                is_from_bot UNINDEXED,
+                tokenize = 'unicode61 remove_diacritics 2'
+            );",
+        )?;
+        // Backfill existing messages into the FTS index. rowid pattern uses
+        // a composite of chat_id and message_id to stay unique.
+        conn.execute_batch(
+            "INSERT INTO messages_fts(content, sender_name, chat_id, message_id, timestamp, is_from_bot)
+             SELECT content, sender_name, chat_id, id, timestamp, is_from_bot FROM messages;",
+        )?;
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(content, sender_name, chat_id, message_id, timestamp, is_from_bot)
+                VALUES (new.content, new.sender_name, new.chat_id, new.id, new.timestamp, new.is_from_bot);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                DELETE FROM messages_fts WHERE chat_id = old.chat_id AND message_id = old.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+                DELETE FROM messages_fts WHERE chat_id = old.chat_id AND message_id = old.id;
+                INSERT INTO messages_fts(content, sender_name, chat_id, message_id, timestamp, is_from_bot)
+                VALUES (new.content, new.sender_name, new.chat_id, new.id, new.timestamp, new.is_from_bot);
+            END;",
+        )?;
+        set_schema_version(conn, 21)?;
+        version = 21;
+    }
+    if version < 22 {
+        // Tool result cache — keyed by SHA-256 of (tool_name + normalized
+        // input JSON). Tools opt in by name; rows are purged lazily via TTL.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tool_result_cache (
+                cache_key TEXT PRIMARY KEY,
+                tool_name TEXT NOT NULL,
+                result_content TEXT NOT NULL,
+                is_error INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_result_cache_tool_expires
+                ON tool_result_cache(tool_name, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_tool_result_cache_expires
+                ON tool_result_cache(expires_at);",
+        )?;
+        set_schema_version(conn, 22)?;
+        version = 22;
+    }
+    if version < 23 {
+        // Tool result artifacts — full content stash for results that exceed
+        // the in-context truncation threshold. The agent reads slices via
+        // the `fetch_artifact` tool. Rows expire after a TTL to bound
+        // storage growth.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tool_result_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                total_chars INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_chat
+                ON tool_result_artifacts(chat_id, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_tool_result_artifacts_expires
+                ON tool_result_artifacts(expires_at);",
+        )?;
+        set_schema_version(conn, 23)?;
+        version = 23;
+    }
+    if version < 24 {
+        // Memory TTL: per-row expiration for time-bounded facts (NULL = never).
+        // Distinct from `valid_to` (knowledge-graph temporal validity) and
+        // `is_archived` (manual demotion).
+        if !table_has_column(conn, "memories", "expires_at")? {
+            conn.execute("ALTER TABLE memories ADD COLUMN expires_at TEXT", [])?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)
+             WHERE expires_at IS NOT NULL",
+            [],
+        )?;
+        set_schema_version(conn, 24)?;
+        version = 24;
+    }
+    if version < 25 {
+        // Skill activation log — drives the auto-archive of agent-created
+        // skills that haven't been used in N days, and surfaces usage
+        // counts in the insights tool.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS skill_activation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_name TEXT NOT NULL,
+                chat_id INTEGER,
+                activated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_activation_name_time
+                ON skill_activation_logs(skill_name, activated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_skill_activation_time
+                ON skill_activation_logs(activated_at);",
+        )?;
+        set_schema_version(conn, 25)?;
+        version = 25;
+    }
+    if version < 26 {
+        // Named, progress-reporting sub-agent runs: a human-friendly `label`
+        // for "what am I working on", plus the latest progress snapshot pushed
+        // by the `report_progress` tool during a long run.
+        if !table_has_column(conn, "subagent_runs", "label")? {
+            conn.execute("ALTER TABLE subagent_runs ADD COLUMN label TEXT", [])?;
+        }
+        if !table_has_column(conn, "subagent_runs", "progress_text")? {
+            conn.execute(
+                "ALTER TABLE subagent_runs ADD COLUMN progress_text TEXT",
+                [],
+            )?;
+        }
+        if !table_has_column(conn, "subagent_runs", "last_progress_at")? {
+            conn.execute(
+                "ALTER TABLE subagent_runs ADD COLUMN last_progress_at TEXT",
+                [],
+            )?;
+        }
+        set_schema_version(conn, 26)?;
+        version = 26;
+    }
+    if version < 27 {
+        // Tamper-evident audit log: each new entry is sealed into a SHA-256 hash
+        // chain (`entry_hash` over the entry's fields plus the previous entry's
+        // `entry_hash`). Existing pre-migration rows stay unsealed (NULL) and are
+        // simply not part of the verifiable chain.
+        if !table_has_column(conn, "audit_logs", "prev_hash")? {
+            conn.execute("ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT", [])?;
+        }
+        if !table_has_column(conn, "audit_logs", "entry_hash")? {
+            conn.execute("ALTER TABLE audit_logs ADD COLUMN entry_hash TEXT", [])?;
+        }
+        set_schema_version(conn, 27)?;
+        version = 27;
+    }
     if version != SCHEMA_VERSION_CURRENT {
         set_schema_version(conn, SCHEMA_VERSION_CURRENT)?;
     }
     Ok(())
+}
+
+/// Lowercase hex of a byte slice (avoids pulling in the `hex` crate).
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Compute the sealing hash for an audit entry: SHA-256 over the previous
+/// entry's hash followed by this entry's content fields, each `\x1f`-terminated
+/// so field boundaries can't be ambiguous. The chain link in `prev_hash` makes
+/// deletion or reordering detectable; covering every field makes in-place edits
+/// detectable.
+#[allow(clippy::too_many_arguments)]
+fn audit_entry_hash(
+    prev_hash: &str,
+    kind: &str,
+    actor: &str,
+    action: &str,
+    target: Option<&str>,
+    status: &str,
+    detail: Option<&str>,
+    created_at: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for field in [
+        prev_hash,
+        kind,
+        actor,
+        action,
+        target.unwrap_or(""),
+        status,
+        detail.unwrap_or(""),
+        created_at,
+    ] {
+        h.update(field.as_bytes());
+        h.update([0x1f]);
+    }
+    to_hex(&h.finalize())
+}
+
+/// A sealed audit row as read for chain verification: id + content fields +
+/// `prev_hash` + `entry_hash`.
+type AuditChainRow = (
+    i64,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+);
+
+/// Result of verifying the audit hash chain.
+#[derive(Debug, Clone)]
+pub struct AuditChainStatus {
+    /// Number of sealed (hash-bearing) entries inspected.
+    pub sealed_entries: usize,
+    /// Whether the chain is fully intact.
+    pub intact: bool,
+    /// The `id` of the first entry where verification failed, if any.
+    pub broken_at: Option<i64>,
+    /// Human-readable reason for the break, if any.
+    pub reason: Option<String>,
 }
 
 impl Database {
@@ -2125,6 +2388,258 @@ impl Database {
         }
     }
 
+    /// Look up a cached tool result by key; returns `None` if missing or
+    /// past its TTL. Passing `now` as an RFC3339 string lets callers
+    /// control "now" deterministically in tests.
+    pub fn get_cached_tool_result(
+        &self,
+        cache_key: &str,
+        now: &str,
+    ) -> Result<Option<CachedToolResult>, MicroClawError> {
+        let conn = self.lock_conn();
+        let row = conn
+            .query_row(
+                "SELECT tool_name, result_content, is_error, metadata_json, created_at, expires_at
+                 FROM tool_result_cache
+                 WHERE cache_key = ?1 AND expires_at > ?2",
+                params![cache_key, now],
+                |r| {
+                    Ok(CachedToolResult {
+                        tool_name: r.get(0)?,
+                        content: r.get(1)?,
+                        is_error: r.get::<_, i64>(2)? != 0,
+                        metadata_json: r.get::<_, Option<String>>(3)?,
+                        created_at: r.get(4)?,
+                        expires_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Insert or replace a cached tool result. Only non-error results
+    /// should be cached in practice; the `is_error` flag is exposed so
+    /// callers can choose a policy.
+    pub fn put_cached_tool_result(
+        &self,
+        cache_key: &str,
+        tool_name: &str,
+        content: &str,
+        is_error: bool,
+        metadata_json: Option<&str>,
+        expires_at: &str,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO tool_result_cache
+                (cache_key, tool_name, result_content, is_error, metadata_json, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                tool_name = excluded.tool_name,
+                result_content = excluded.result_content,
+                is_error = excluded.is_error,
+                metadata_json = excluded.metadata_json,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at",
+            params![cache_key, tool_name, content, is_error as i64, metadata_json, now, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Delete all expired cache rows. Returns number of rows deleted.
+    pub fn prune_tool_result_cache(&self, now: &str) -> Result<usize, MicroClawError> {
+        let conn = self.lock_conn();
+        let n = conn.execute(
+            "DELETE FROM tool_result_cache WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(n)
+    }
+
+    /// Persist a tool-result artifact (full content) so the agent can fetch
+    /// slices later via `fetch_artifact`. The caller is responsible for
+    /// generating a unique `artifact_id`.
+    pub fn save_tool_artifact(
+        &self,
+        artifact_id: &str,
+        chat_id: i64,
+        tool_name: &str,
+        content: &str,
+        expires_at: &str,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let total_chars = content.chars().count() as i64;
+        conn.execute(
+            "INSERT INTO tool_result_artifacts
+                (artifact_id, chat_id, tool_name, content, total_chars, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                artifact_id,
+                chat_id,
+                tool_name,
+                content,
+                total_chars,
+                now,
+                expires_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a character-range slice of a stored artifact. Returns
+    /// `(meta, slice, returned_chars)` if the artifact exists and is not
+    /// expired. `offset` and `length` are interpreted as Unicode code
+    /// points to keep the cap predictable across multi-byte content.
+    pub fn get_tool_artifact_slice(
+        &self,
+        artifact_id: &str,
+        offset: usize,
+        length: usize,
+        now: &str,
+    ) -> Result<Option<(ToolArtifactMeta, String)>, MicroClawError> {
+        let conn = self.lock_conn();
+        let row = conn
+            .query_row(
+                "SELECT artifact_id, chat_id, tool_name, content, total_chars, created_at, expires_at
+                 FROM tool_result_artifacts
+                 WHERE artifact_id = ?1 AND expires_at > ?2",
+                params![artifact_id, now],
+                |r| {
+                    let content: String = r.get(3)?;
+                    Ok((
+                        ToolArtifactMeta {
+                            artifact_id: r.get(0)?,
+                            chat_id: r.get(1)?,
+                            tool_name: r.get(2)?,
+                            total_chars: r.get(4)?,
+                            created_at: r.get(5)?,
+                            expires_at: r.get(6)?,
+                        },
+                        content,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((meta, content)) = row else {
+            return Ok(None);
+        };
+        let slice: String = content.chars().skip(offset).take(length).collect();
+        Ok(Some((meta, slice)))
+    }
+
+    /// Delete expired artifact rows. Returns number of rows deleted.
+    pub fn prune_tool_artifacts(&self, now: &str) -> Result<usize, MicroClawError> {
+        let conn = self.lock_conn();
+        let n = conn.execute(
+            "DELETE FROM tool_result_artifacts WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(n)
+    }
+
+    /// Append a row to the skill activation log. `chat_id` may be 0 for
+    /// channel-less invocations (e.g. tests).
+    pub fn log_skill_activation(
+        &self,
+        skill_name: &str,
+        chat_id: i64,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO skill_activation_logs (skill_name, chat_id, activated_at)
+             VALUES (?1, ?2, ?3)",
+            params![skill_name, chat_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Most-recent activation timestamp for a skill, or `None` if never
+    /// activated. Used by the auto-archive job.
+    pub fn last_skill_activation_at(
+        &self,
+        skill_name: &str,
+    ) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn.query_row(
+            "SELECT activated_at FROM skill_activation_logs
+             WHERE skill_name = ?1
+             ORDER BY activated_at DESC
+             LIMIT 1",
+            params![skill_name],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(ts) => Ok(Some(ts)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Activation counts for every skill seen in the last `since` window.
+    /// Returns `(skill_name, count)` rows ordered by count descending.
+    /// Used by the insights surface and operator dashboards.
+    pub fn skill_activation_counts_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<(String, i64)>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT skill_name, COUNT(*) AS n
+             FROM skill_activation_logs
+             WHERE activated_at >= ?1
+             GROUP BY skill_name
+             ORDER BY n DESC, skill_name ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![since], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Overwrite the session label for a chat. No-op if the chat has no
+    /// session row yet. Used by the title generator background task.
+    pub fn set_session_label(&self, chat_id: i64, label: &str) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE sessions SET label = ?1 WHERE chat_id = ?2",
+            params![label, chat_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return the current session label + message count for a chat. Used
+    /// to decide whether the title generator should run.
+    pub fn get_session_label_and_length(
+        &self,
+        chat_id: i64,
+    ) -> Result<Option<(Option<String>, usize)>, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn
+            .query_row(
+                "SELECT label, messages_json FROM sessions WHERE chat_id = ?1",
+                params![chat_id],
+                |row| {
+                    let label: Option<String> = row.get(0)?;
+                    let json: String = row.get(1)?;
+                    Ok((label, json))
+                },
+            )
+            .optional()?;
+        let Some((label, json)) = result else {
+            return Ok(None);
+        };
+        let count = serde_json::from_str::<Vec<serde_json::Value>>(&json)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        Ok(Some((label, count)))
+    }
+
     pub fn save_session_settings(
         &self,
         chat_id: i64,
@@ -2562,12 +3077,102 @@ impl Database {
     ) -> Result<i64, MicroClawError> {
         let conn = self.lock_conn();
         let now = chrono::Utc::now().to_rfc3339();
+        // Seal the entry into the hash chain. Reading the latest sealed hash and
+        // inserting happen under the same connection lock, so concurrent callers
+        // can't race the chain.
+        let prev_hash: String = conn
+            .query_row(
+                "SELECT entry_hash FROM audit_logs
+                 WHERE entry_hash IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| AUDIT_GENESIS_HASH.to_string());
+        let entry_hash = audit_entry_hash(
+            &prev_hash, kind, actor, action, target, status, detail, &now,
+        );
         conn.execute(
-            "INSERT INTO audit_logs(kind, actor, action, target, status, detail, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![kind, actor, action, target, status, detail, now],
+            "INSERT INTO audit_logs(kind, actor, action, target, status, detail, created_at, prev_hash, entry_hash)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![kind, actor, action, target, status, detail, now, prev_hash, entry_hash],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Verify the tamper-evident audit hash chain. Walks all sealed entries in
+    /// `id` order, checking that each links to the previous (`prev_hash`) and
+    /// that its `entry_hash` still matches its content. Returns the first break,
+    /// if any. Unsealed legacy rows (NULL `entry_hash`) are ignored.
+    pub fn verify_audit_chain(&self) -> Result<AuditChainStatus, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, actor, action, target, status, detail, created_at, prev_hash, entry_hash
+             FROM audit_logs
+             WHERE entry_hash IS NOT NULL
+             ORDER BY id ASC",
+        )?;
+        // Collect first so the statement borrow is released before we iterate.
+        let rows: Vec<AuditChainRow> =
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut expected_prev = AUDIT_GENESIS_HASH.to_string();
+        let mut sealed = 0usize;
+        for (id, kind, actor, action, target, status, detail, created_at, prev_hash, entry_hash) in &rows {
+            sealed += 1;
+            let prev = prev_hash.as_deref().unwrap_or("");
+            if prev != expected_prev {
+                return Ok(AuditChainStatus {
+                    sealed_entries: sealed,
+                    intact: false,
+                    broken_at: Some(*id),
+                    reason: Some(
+                        "prev_hash does not link to the previous entry (an entry was deleted, inserted, or reordered)".to_string(),
+                    ),
+                });
+            }
+            let recomputed = audit_entry_hash(
+                prev,
+                kind,
+                actor,
+                action,
+                target.as_deref(),
+                status,
+                detail.as_deref(),
+                created_at,
+            );
+            if &recomputed != entry_hash {
+                return Ok(AuditChainStatus {
+                    sealed_entries: sealed,
+                    intact: false,
+                    broken_at: Some(*id),
+                    reason: Some("entry_hash does not match content (an entry was modified)".to_string()),
+                });
+            }
+            expected_prev = entry_hash.clone();
+        }
+
+        Ok(AuditChainStatus {
+            sealed_entries: sealed,
+            intact: true,
+            broken_at: None,
+            reason: None,
+        })
     }
 
     pub fn list_audit_logs(
@@ -2769,6 +3374,68 @@ impl Database {
                     timestamp: row.get(5)?,
                 })
             })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    /// Full-text search over stored messages using the SQLite FTS5 index.
+    ///
+    /// `query` must be a valid FTS5 match expression (simple words are OK,
+    /// e.g. `"rust async"`). Returns ranked matches newest-first for
+    /// equally-ranked rows. When `chat_id` is `Some`, the search is scoped to
+    /// that chat; otherwise it spans all chats. When `since` is `Some`, only
+    /// messages with timestamp >= that value are returned. Results are
+    /// truncated to `limit` rows.
+    pub fn search_messages_fts(
+        &self,
+        query: &str,
+        chat_id: Option<i64>,
+        since: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, MicroClawError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 200) as i64;
+        let conn = self.lock_conn();
+
+        let mut sql = String::from(
+            "SELECT m.id, m.chat_id, m.sender_name, m.content, m.is_from_bot, m.timestamp
+             FROM messages_fts f
+             JOIN messages m ON m.id = f.message_id AND m.chat_id = f.chat_id
+             WHERE f.content MATCH ?1",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
+        if let Some(cid) = chat_id {
+            sql.push_str(" AND m.chat_id = ?");
+            sql.push_str(&(binds.len() + 1).to_string());
+            binds.push(Box::new(cid));
+        }
+        if let Some(ts) = since {
+            sql.push_str(" AND m.timestamp >= ?");
+            sql.push_str(&(binds.len() + 1).to_string());
+            binds.push(Box::new(ts.to_string()));
+        }
+        sql.push_str(" ORDER BY bm25(messages_fts), m.timestamp DESC LIMIT ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(limit));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let bind_refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let messages = stmt
+            .query_map(
+                rusqlite::params_from_iter(bind_refs.iter().copied()),
+                |row| {
+                    Ok(StoredMessage {
+                        id: row.get(0)?,
+                        chat_id: row.get(1)?,
+                        sender_name: row.get(2)?,
+                        content: row.get(3)?,
+                        is_from_bot: row.get::<_, i32>(4)? != 0,
+                        timestamp: row.get(5)?,
+                    })
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(messages)
     }
@@ -3078,18 +3745,20 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
         let mut stmt = conn.prepare(
             "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
-                    confidence, source, last_seen_at, is_archived, archived_at
+                    confidence, source, last_seen_at, is_archived, archived_at, expires_at
              FROM memories
              WHERE (chat_id = ?1 OR chat_id IS NULL)
                AND is_archived = 0
                AND confidence >= 0.45
+               AND (expires_at IS NULL OR expires_at > ?3)
              ORDER BY updated_at DESC
              LIMIT ?2",
         )?;
         let memories = stmt
-            .query_map(params![chat_id, limit as i64], |row| {
+            .query_map(params![chat_id, limit as i64, now], |row| {
                 Ok(Memory {
                     id: row.get(0)?,
                     chat_id: row.get(1)?,
@@ -3103,6 +3772,7 @@ impl Database {
                     last_seen_at: row.get(9)?,
                     is_archived: row.get::<_, i64>(10)? != 0,
                     archived_at: row.get(11)?,
+                    expires_at: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3116,7 +3786,7 @@ impl Database {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
-                    confidence, source, last_seen_at, is_archived, archived_at
+                    confidence, source, last_seen_at, is_archived, archived_at, expires_at
              FROM memories
              WHERE (chat_id = ?1 OR (?1 IS NULL AND chat_id IS NULL))",
         )?;
@@ -3135,10 +3805,23 @@ impl Database {
                     last_seen_at: row.get(9)?,
                     is_archived: row.get::<_, i64>(10)? != 0,
                     archived_at: row.get(11)?,
+                    expires_at: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(memories)
+    }
+
+    /// Total number of stored messages in a chat (both sides). Used as a cheap
+    /// proxy for how well the bot "knows" this person.
+    pub fn count_messages_for_chat(&self, chat_id: i64) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = ?1",
+            params![chat_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 
     pub fn get_active_chat_ids_since(&self, since: &str) -> Result<Vec<i64>, MicroClawError> {
@@ -3148,6 +3831,24 @@ impl Database {
         )?;
         let ids = stmt
             .query_map(params![since], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Chats whose most recent message is older than `cutoff` (i.e. idle since
+    /// then). Only chats that have ever had a message are returned.
+    pub fn list_idle_chats(&self, cutoff: &str, limit: usize) -> Result<Vec<i64>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT chat_id FROM messages
+             GROUP BY chat_id
+             HAVING MAX(timestamp) < ?1
+             LIMIT ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![cutoff, limit.max(1) as i64], |row| {
+                row.get::<_, i64>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ids)
     }
@@ -3172,12 +3873,14 @@ impl Database {
     ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let pattern = format!("%{}%", query.to_lowercase());
+        let now = chrono::Utc::now().to_rfc3339();
         let mut sql = String::from(
             "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
-                    confidence, source, last_seen_at, is_archived, archived_at
+                    confidence, source, last_seen_at, is_archived, archived_at, expires_at
              FROM memories
              WHERE (chat_id = ?1 OR chat_id IS NULL)
-               AND LOWER(content) LIKE ?2",
+               AND LOWER(content) LIKE ?2
+               AND (expires_at IS NULL OR expires_at > ?4)",
         );
         if !include_archived {
             sql.push_str(" AND is_archived = 0");
@@ -3188,7 +3891,7 @@ impl Database {
         sql.push_str(" ORDER BY confidence DESC, updated_at DESC LIMIT ?3");
         let mut stmt = conn.prepare(&sql)?;
         let memories = stmt
-            .query_map(params![chat_id, pattern, limit as i64], |row| {
+            .query_map(params![chat_id, pattern, limit as i64, now], |row| {
                 Ok(Memory {
                     id: row.get(0)?,
                     chat_id: row.get(1)?,
@@ -3202,6 +3905,7 @@ impl Database {
                     last_seen_at: row.get(9)?,
                     is_archived: row.get::<_, i64>(10)? != 0,
                     archived_at: row.get(11)?,
+                    expires_at: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3213,6 +3917,32 @@ impl Database {
         let conn = self.lock_conn();
         let rows = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
         Ok(rows > 0)
+    }
+
+    /// Set or clear the `expires_at` of a memory. Pass `None` to clear.
+    pub fn set_memory_expires_at(
+        &self,
+        id: i64,
+        expires_at: Option<&str>,
+    ) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let rows = conn.execute(
+            "UPDATE memories SET expires_at = ?1 WHERE id = ?2",
+            params![expires_at, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Hard-delete memories whose `expires_at` is at or before `now`.
+    /// Returns the number of rows deleted. Called from the reflector on its
+    /// scheduled tick.
+    pub fn prune_expired_memories(&self, now: &str) -> Result<usize, MicroClawError> {
+        let conn = self.lock_conn();
+        let n = conn.execute(
+            "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(n)
     }
 
     /// Update content and category of an existing memory. Returns true if found.
@@ -3295,7 +4025,7 @@ impl Database {
         let conn = self.lock_conn();
         let mut query = String::from(
             "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
-             , confidence, source, last_seen_at, is_archived, archived_at
+             , confidence, source, last_seen_at, is_archived, archived_at, expires_at
              FROM memories
              WHERE embedding_model IS NULL
                AND is_archived = 0",
@@ -3321,6 +4051,7 @@ impl Database {
                 last_seen_at: row.get(9)?,
                 is_archived: row.get::<_, i64>(10)? != 0,
                 archived_at: row.get(11)?,
+                expires_at: row.get(12)?,
             })
         };
 
@@ -3427,7 +4158,7 @@ impl Database {
         let conn = self.lock_conn();
         let result = conn.query_row(
             "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model,
-                    confidence, source, last_seen_at, is_archived, archived_at
+                    confidence, source, last_seen_at, is_archived, archived_at, expires_at
              FROM memories WHERE id = ?1",
             params![id],
             |row| {
@@ -3444,6 +4175,7 @@ impl Database {
                     last_seen_at: row.get(9)?,
                     is_archived: row.get::<_, i64>(10)? != 0,
                     archived_at: row.get(11)?,
+                    expires_at: row.get(12)?,
                 })
             },
         );
@@ -3746,6 +4478,128 @@ impl Database {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Distinct active entities (subjects and objects) for a chat, used to find
+    /// which graph nodes a query mentions so retrieval can be seeded from them.
+    pub fn kg_distinct_entities(
+        &self,
+        chat_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT entity FROM (
+                 SELECT subject AS entity FROM knowledge_graph
+                 WHERE (?1 IS NULL OR chat_id = ?1 OR chat_id IS NULL) AND valid_to IS NULL
+                 UNION
+                 SELECT object AS entity FROM knowledge_graph
+                 WHERE (?1 IS NULL OR chat_id = ?1 OR chat_id IS NULL) AND valid_to IS NULL
+             )
+             ORDER BY LENGTH(entity) DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![chat_id, limit as i64], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Bounded breadth-first expansion of the knowledge graph from `seed`
+    /// entities, returning the active triples reachable within `max_hops`. This
+    /// is the graph-augmented retrieval primitive: seed from entities a query
+    /// mentions, then pull in directly-connected facts (and their neighbours)
+    /// so multi-hop context surfaces without the agent having to query the graph
+    /// by hand. Bounded by `total_limit` triples and a per-hop frontier cap, so
+    /// it stays cheap even on large graphs.
+    pub fn kg_neighborhood(
+        &self,
+        chat_id: Option<i64>,
+        seeds: &[String],
+        max_hops: usize,
+        total_limit: usize,
+    ) -> Result<Vec<KgTriple>, MicroClawError> {
+        if seeds.is_empty() || total_limit == 0 || max_hops == 0 {
+            return Ok(Vec::new());
+        }
+        const FRONTIER_CAP: usize = 32;
+        const PER_NODE_LIMIT: i64 = 8;
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, subject, predicate, object, chat_id, valid_from, valid_to, confidence, source, source_memory_id, created_at
+             FROM knowledge_graph
+             WHERE (LOWER(subject) = LOWER(?1) OR LOWER(object) = LOWER(?1))
+               AND (?2 IS NULL OR chat_id = ?2 OR chat_id IS NULL)
+               AND valid_to IS NULL
+             ORDER BY confidence DESC
+             LIMIT ?3",
+        )?;
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<KgTriple> {
+            Ok(KgTriple {
+                id: row.get(0)?,
+                subject: row.get(1)?,
+                predicate: row.get(2)?,
+                object: row.get(3)?,
+                chat_id: row.get(4)?,
+                valid_from: row.get(5)?,
+                valid_to: row.get(6)?,
+                confidence: row.get(7)?,
+                source: row.get(8)?,
+                source_memory_id: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        };
+
+        let mut visited_entities: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_triples: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut frontier: Vec<String> = Vec::new();
+        for s in seeds {
+            let lc = s.to_lowercase();
+            if visited_entities.insert(lc) {
+                frontier.push(s.clone());
+            }
+        }
+        let mut out: Vec<KgTriple> = Vec::new();
+
+        for _hop in 0..max_hops {
+            if out.len() >= total_limit || frontier.is_empty() {
+                break;
+            }
+            frontier.truncate(FRONTIER_CAP);
+            let mut next: Vec<String> = Vec::new();
+            for entity in &frontier {
+                let rows = stmt
+                    .query_map(params![entity, chat_id, PER_NODE_LIMIT], map_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                for t in rows {
+                    if !seen_triples.insert(t.id) {
+                        continue;
+                    }
+                    for endpoint in [&t.subject, &t.object] {
+                        let lc = endpoint.to_lowercase();
+                        if visited_entities.insert(lc) {
+                            next.push(endpoint.clone());
+                        }
+                    }
+                    out.push(t);
+                    if out.len() >= total_limit {
+                        break;
+                    }
+                }
+                if out.len() >= total_limit {
+                    break;
+                }
+            }
+            frontier = next;
+        }
+
+        out.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(total_limit);
+        Ok(out)
     }
 
     /// Get a timeline of all triples for a subject, including invalidated ones.
@@ -4172,8 +5026,8 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO subagent_runs(
-                run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at, provider, model
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'accepted', ?9, ?10, ?11)",
+                run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at, provider, model, label
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'accepted', ?9, ?10, ?11, ?12)",
             params![
                 params.run_id,
                 params.parent_run_id,
@@ -4185,10 +5039,41 @@ impl Database {
                 params.context,
                 now,
                 params.provider,
-                params.model
+                params.model,
+                params.label
             ],
         )?;
         Ok(())
+    }
+
+    /// Record a progress snapshot for a running sub-agent: update the latest
+    /// progress text/time on the run and append a `progress` event to its
+    /// timeline. Returns the previous `last_progress_at` (for throttling).
+    pub fn record_subagent_progress(
+        &self,
+        run_id: &str,
+        progress_text: &str,
+    ) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let prev: Option<String> = conn
+            .query_row(
+                "SELECT last_progress_at FROM subagent_runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        conn.execute(
+            "UPDATE subagent_runs SET progress_text = ?2, last_progress_at = ?3 WHERE run_id = ?1",
+            params![run_id, progress_text, now],
+        )?;
+        conn.execute(
+            "INSERT INTO subagent_events(run_id, event_type, detail, created_at)
+             VALUES (?1, 'progress', ?2, ?3)",
+            params![run_id, progress_text, now],
+        )?;
+        Ok(prev)
     }
 
     pub fn mark_subagent_queued(&self, run_id: &str) -> Result<(), MicroClawError> {
@@ -4270,7 +5155,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at,
                     started_at, finished_at, cancel_requested, error_text, result_text,
-                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json
+                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json,
+                    label, progress_text, last_progress_at
              FROM subagent_runs
              WHERE chat_id = ?1
              ORDER BY created_at DESC
@@ -4299,6 +5185,71 @@ impl Database {
                 provider: row.get(18)?,
                 model: row.get(19)?,
                 artifact_json: row.get(20)?,
+                label: row.get(21)?,
+                progress_text: row.get(22)?,
+                last_progress_at: row.get(23)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Average wall-clock duration (seconds) of recently-completed sub-agent runs
+    /// in a chat, for rough ETA hints. `None` when there's no completed history.
+    pub fn avg_completed_subagent_duration_secs(
+        &self,
+        chat_id: i64,
+    ) -> Result<Option<i64>, MicroClawError> {
+        let conn = self.lock_conn();
+        let avg: Option<f64> = conn.query_row(
+            "SELECT AVG((julianday(finished_at) - julianday(started_at)) * 86400.0)
+             FROM subagent_runs
+             WHERE chat_id = ?1 AND status = 'completed'
+               AND started_at IS NOT NULL AND finished_at IS NOT NULL",
+            params![chat_id],
+            |row| row.get(0),
+        )?;
+        Ok(avg.map(|v| v.round() as i64).filter(|v| *v > 0))
+    }
+
+    /// All currently-active sub-agent runs across chats (accepted/queued/running),
+    /// oldest first. Used by the proactive task-standup loop.
+    pub fn list_active_subagent_runs(&self) -> Result<Vec<SubagentRunRecord>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at,
+                    started_at, finished_at, cancel_requested, error_text, result_text,
+                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json,
+                    label, progress_text, last_progress_at
+             FROM subagent_runs
+             WHERE status IN ('accepted', 'queued', 'running')
+             ORDER BY chat_id ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SubagentRunRecord {
+                run_id: row.get(0)?,
+                parent_run_id: row.get(1)?,
+                depth: row.get(2)?,
+                token_budget: row.get(3)?,
+                chat_id: row.get(4)?,
+                caller_channel: row.get(5)?,
+                task: row.get(6)?,
+                context: row.get(7)?,
+                status: row.get(8)?,
+                created_at: row.get(9)?,
+                started_at: row.get(10)?,
+                finished_at: row.get(11)?,
+                cancel_requested: row.get::<_, i64>(12)? != 0,
+                error_text: row.get(13)?,
+                result_text: row.get(14)?,
+                input_tokens: row.get(15)?,
+                output_tokens: row.get(16)?,
+                total_tokens: row.get(17)?,
+                provider: row.get(18)?,
+                model: row.get(19)?,
+                artifact_json: row.get(20)?,
+                label: row.get(21)?,
+                progress_text: row.get(22)?,
+                last_progress_at: row.get(23)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4313,7 +5264,8 @@ impl Database {
         conn.query_row(
             "SELECT run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at,
                     started_at, finished_at, cancel_requested, error_text, result_text,
-                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json
+                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json,
+                    label, progress_text, last_progress_at
              FROM subagent_runs
              WHERE run_id = ?1 AND chat_id = ?2",
             params![run_id, chat_id],
@@ -4340,11 +5292,92 @@ impl Database {
                     provider: row.get(18)?,
                     model: row.get(19)?,
                     artifact_json: row.get(20)?,
+                label: row.get(21)?,
+                progress_text: row.get(22)?,
+                last_progress_at: row.get(23)?,
                 })
             },
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// All child runs of a parent run, oldest first.
+    pub fn list_subagent_children(
+        &self,
+        parent_run_id: &str,
+    ) -> Result<Vec<SubagentRunRecord>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at,
+                    started_at, finished_at, cancel_requested, error_text, result_text,
+                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json,
+                    label, progress_text, last_progress_at
+             FROM subagent_runs
+             WHERE parent_run_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_run_id], |row| {
+            Ok(SubagentRunRecord {
+                run_id: row.get(0)?,
+                parent_run_id: row.get(1)?,
+                depth: row.get(2)?,
+                token_budget: row.get(3)?,
+                chat_id: row.get(4)?,
+                caller_channel: row.get(5)?,
+                task: row.get(6)?,
+                context: row.get(7)?,
+                status: row.get(8)?,
+                created_at: row.get(9)?,
+                started_at: row.get(10)?,
+                finished_at: row.get(11)?,
+                cancel_requested: row.get::<_, i64>(12)? != 0,
+                error_text: row.get(13)?,
+                result_text: row.get(14)?,
+                input_tokens: row.get(15)?,
+                output_tokens: row.get(16)?,
+                total_tokens: row.get(17)?,
+                provider: row.get(18)?,
+                model: row.get(19)?,
+                artifact_json: row.get(20)?,
+                label: row.get(21)?,
+                progress_text: row.get(22)?,
+                last_progress_at: row.get(23)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Resolve a sub-agent reference that is either an exact run_id or a
+    /// human-friendly label, scoped to a chat. Exact run_id wins; otherwise the
+    /// most recent run with that label is returned, preferring active ones.
+    pub fn resolve_subagent_run_id(
+        &self,
+        chat_id: i64,
+        run_id_or_label: &str,
+    ) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let exact: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM subagent_runs WHERE run_id = ?1 AND chat_id = ?2",
+                params![run_id_or_label, chat_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
+        let by_label: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM subagent_runs
+                 WHERE chat_id = ?1 AND label = ?2
+                 ORDER BY (status IN ('accepted','queued','running')) DESC, created_at DESC
+                 LIMIT 1",
+                params![chat_id, run_id_or_label],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(by_label)
     }
 
     pub fn is_subagent_cancel_requested(&self, run_id: &str) -> Result<bool, MicroClawError> {
@@ -4719,7 +5752,8 @@ impl Database {
         let mut stmt = conn.prepare(&format!(
             "SELECT run_id, parent_run_id, depth, token_budget, chat_id, caller_channel, task, context, status, created_at,
                     started_at, finished_at, cancel_requested, error_text, result_text,
-                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json
+                    input_tokens, output_tokens, total_tokens, provider, model, artifact_json,
+                    label, progress_text, last_progress_at
              FROM subagent_runs
              WHERE 1=1 {active_filter}
              ORDER BY created_at DESC
@@ -4750,6 +5784,9 @@ impl Database {
                     provider: row.get(18)?,
                     model: row.get(19)?,
                     artifact_json: row.get(20)?,
+                    label: row.get(21)?,
+                    progress_text: row.get(22)?,
+                    last_progress_at: row.get(23)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -4777,6 +5814,9 @@ impl Database {
                     provider: row.get(18)?,
                     model: row.get(19)?,
                     artifact_json: row.get(20)?,
+                    label: row.get(21)?,
+                    progress_text: row.get(22)?,
+                    last_progress_at: row.get(23)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -4810,6 +5850,58 @@ mod tests {
 
     fn cleanup(dir: &std::path::Path) {
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn audit_chain_intact_after_appends() {
+        let (db, dir) = test_db();
+        db.log_audit_event("auth", "alice", "login", None, "ok", None).unwrap();
+        db.log_audit_event("tool", "bot", "web_fetch", Some("https://x"), "ok", Some("200")).unwrap();
+        db.log_audit_event("auth", "alice", "logout", None, "ok", None).unwrap();
+        let status = db.verify_audit_chain().unwrap();
+        assert!(status.intact, "reason: {:?}", status.reason);
+        assert_eq!(status.sealed_entries, 3);
+        assert_eq!(status.broken_at, None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn audit_chain_detects_modification() {
+        let (db, dir) = test_db();
+        db.log_audit_event("auth", "alice", "login", None, "ok", None).unwrap();
+        let id = db
+            .log_audit_event("tool", "bot", "web_fetch", Some("https://x"), "ok", None)
+            .unwrap();
+        db.log_audit_event("auth", "alice", "logout", None, "ok", None).unwrap();
+        {
+            let conn = db.lock_conn();
+            conn.execute("UPDATE audit_logs SET status='tampered' WHERE id=?1", params![id])
+                .unwrap();
+        }
+        let status = db.verify_audit_chain().unwrap();
+        assert!(!status.intact);
+        assert_eq!(status.broken_at, Some(id));
+        assert!(status.reason.unwrap().contains("modified"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn audit_chain_detects_deletion() {
+        let (db, dir) = test_db();
+        db.log_audit_event("auth", "alice", "login", None, "ok", None).unwrap();
+        let id = db
+            .log_audit_event("tool", "bot", "web_fetch", Some("https://x"), "ok", None)
+            .unwrap();
+        db.log_audit_event("auth", "alice", "logout", None, "ok", None).unwrap();
+        {
+            let conn = db.lock_conn();
+            conn.execute("DELETE FROM audit_logs WHERE id=?1", params![id]).unwrap();
+        }
+        let status = db.verify_audit_chain().unwrap();
+        assert!(!status.intact);
+        assert!(status.broken_at.is_some());
+        assert!(status.reason.unwrap().contains("deleted"));
+        cleanup(&dir);
     }
 
     #[test]
@@ -5139,6 +6231,65 @@ mod tests {
         assert_eq!(messages[0].sender_name, "alice");
         assert_eq!(messages[0].content, "hello");
         assert!(!messages[0].is_from_bot);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_search_messages_fts_basic() {
+        let (db, dir) = test_db();
+        let now = chrono::Utc::now();
+        let messages = [
+            ("chat-1", 101, "alice", "Rust async futures are awesome"),
+            ("chat-2", 101, "bot", "I agree, tokio makes them easy"),
+            (
+                "chat-3",
+                101,
+                "alice",
+                "Let's talk about JavaScript promises instead",
+            ),
+            ("chat-4", 202, "bob", "Discussing Rust borrow checker"),
+        ];
+        for (i, (id, chat, sender, content)) in messages.iter().enumerate() {
+            let msg = StoredMessage {
+                id: (*id).into(),
+                chat_id: *chat,
+                sender_name: (*sender).into(),
+                content: (*content).into(),
+                is_from_bot: *sender == "bot",
+                timestamp: (now + chrono::Duration::seconds(i as i64)).to_rfc3339(),
+            };
+            db.store_message(&msg).unwrap();
+        }
+
+        let rust_hits = db.search_messages_fts("rust", None, None, 10).unwrap();
+        assert!(rust_hits.len() >= 2, "expected at least 2 rust matches");
+        assert!(rust_hits
+            .iter()
+            .all(|m| m.content.to_lowercase().contains("rust")));
+
+        let scoped = db.search_messages_fts("rust", Some(101), None, 10).unwrap();
+        assert!(scoped.iter().all(|m| m.chat_id == 101));
+
+        let empty = db.search_messages_fts("", None, None, 10).unwrap();
+        assert!(empty.is_empty());
+
+        let no_match = db
+            .search_messages_fts("nothingmatchesthis", None, None, 10)
+            .unwrap();
+        assert!(no_match.is_empty());
+
+        // Delete and confirm the FTS row is also removed via trigger.
+        {
+            let conn = db.lock_conn();
+            conn.execute(
+                "DELETE FROM messages WHERE id = ?1 AND chat_id = ?2",
+                params!["chat-1", 101i64],
+            )
+            .unwrap();
+        }
+        let after_delete = db.search_messages_fts("awesome", None, None, 10).unwrap();
+        assert!(after_delete.is_empty());
+
         cleanup(&dir);
     }
 
@@ -6280,6 +7431,45 @@ mod tests {
     }
 
     #[test]
+    fn test_kg_neighborhood_bounded_multihop_expansion() {
+        let (db, dir) = test_db();
+        let chat = Some(7i64);
+        let vf = "2026-01-01T00:00:00Z";
+        // Alice -works_at-> Acme -located_in-> Berlin ; plus a noise edge.
+        db.kg_insert_triple("Alice", "works_at", "Acme", chat, vf, 0.9, "test", None)
+            .unwrap();
+        db.kg_insert_triple("Acme", "located_in", "Berlin", chat, vf, 0.8, "test", None)
+            .unwrap();
+        db.kg_insert_triple("Berlin", "capital_of", "Germany", chat, vf, 0.7, "test", None)
+            .unwrap();
+        db.kg_insert_triple("Zoe", "likes", "Tea", chat, vf, 0.6, "test", None)
+            .unwrap();
+
+        // Distinct entities should include all nodes, longest-first.
+        let ents = db.kg_distinct_entities(chat, 100).unwrap();
+        assert!(ents.iter().any(|e| e == "Acme"));
+        assert!(ents.iter().any(|e| e == "Germany"));
+
+        // 1 hop from Alice reaches the works_at edge but not located_in.
+        let one = db.kg_neighborhood(chat, &["Alice".to_string()], 1, 10).unwrap();
+        assert!(one.iter().any(|t| t.predicate == "works_at"));
+        assert!(!one.iter().any(|t| t.predicate == "located_in"));
+
+        // 2 hops from Alice pulls in Acme's edges (multi-hop), but never Zoe's.
+        let two = db.kg_neighborhood(chat, &["Alice".to_string()], 2, 10).unwrap();
+        assert!(two.iter().any(|t| t.predicate == "located_in"));
+        assert!(!two.iter().any(|t| t.subject == "Zoe"));
+
+        // total_limit is respected.
+        let capped = db.kg_neighborhood(chat, &["Alice".to_string()], 3, 1).unwrap();
+        assert_eq!(capped.len(), 1);
+
+        // Empty seeds → empty result, no panic.
+        assert!(db.kg_neighborhood(chat, &[], 2, 10).unwrap().is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
     fn test_log_llm_usage_and_summary() {
         let (db, dir) = test_db();
         db.log_llm_usage(
@@ -6771,6 +7961,114 @@ mod tests {
         cleanup(&dir);
     }
 
+    #[test]
+    fn test_skill_activation_log_and_query() {
+        let (db, dir) = test_db();
+        // No activations yet → None
+        assert!(db.last_skill_activation_at("alpha").unwrap().is_none());
+
+        db.log_skill_activation("alpha", 7).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        db.log_skill_activation("alpha", 7).unwrap();
+        db.log_skill_activation("beta", 8).unwrap();
+
+        let last_alpha = db.last_skill_activation_at("alpha").unwrap().unwrap();
+        let last_beta = db.last_skill_activation_at("beta").unwrap().unwrap();
+        assert!(last_alpha >= last_beta || last_alpha <= last_beta);
+
+        let counts = db
+            .skill_activation_counts_since("1970-01-01T00:00:00Z")
+            .unwrap();
+        let alpha = counts.iter().find(|(n, _)| n == "alpha").unwrap();
+        let beta = counts.iter().find(|(n, _)| n == "beta").unwrap();
+        assert_eq!(alpha.1, 2);
+        assert_eq!(beta.1, 1);
+        // Counts ordered by n DESC then name — alpha first.
+        assert_eq!(counts[0].0, "alpha");
+
+        // Cutoff in the future → no rows.
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let none = db.skill_activation_counts_since(&future).unwrap();
+        assert!(none.is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_memory_ttl_filters_and_prunes() {
+        let (db, dir) = test_db();
+        let durable = db
+            .insert_memory(Some(7), "durable fact", "KNOWLEDGE")
+            .unwrap();
+        let expiring = db
+            .insert_memory(Some(7), "transient fact", "KNOWLEDGE")
+            .unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+
+        // Future expiry — still surfaced in retrieval.
+        db.set_memory_expires_at(durable, Some(&future)).unwrap();
+        // Past expiry — gets filtered from retrieval right away.
+        db.set_memory_expires_at(expiring, Some(&past)).unwrap();
+
+        let ctx = db.get_memories_for_context(7, 50).unwrap();
+        let ids: Vec<i64> = ctx.iter().map(|m| m.id).collect();
+        assert!(ids.contains(&durable), "durable memory should be visible");
+        assert!(
+            !ids.contains(&expiring),
+            "expired memory must not appear in context retrieval"
+        );
+
+        // Search also filters.
+        let hits = db.search_memories(7, "fact", 50).unwrap();
+        assert!(hits.iter().all(|m| m.id != expiring));
+
+        // Prune deletes the row.
+        let now = chrono::Utc::now().to_rfc3339();
+        let pruned = db.prune_expired_memories(&now).unwrap();
+        assert_eq!(pruned, 1);
+        assert!(db.get_memory_by_id(expiring).unwrap().is_none());
+        assert!(db.get_memory_by_id(durable).unwrap().is_some());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_tool_artifact_save_and_slice() {
+        let (db, dir) = test_db();
+        let now = chrono::Utc::now();
+        let expires = (now + chrono::Duration::hours(1)).to_rfc3339();
+        let body: String = "0123456789".repeat(20); // 200 chars
+        db.save_tool_artifact("art_x", 42, "bash", &body, &expires)
+            .unwrap();
+
+        // First slice from offset 0
+        let (meta, slice) = db
+            .get_tool_artifact_slice("art_x", 0, 50, &now.to_rfc3339())
+            .unwrap()
+            .expect("artifact present");
+        assert_eq!(meta.chat_id, 42);
+        assert_eq!(meta.tool_name, "bash");
+        assert_eq!(meta.total_chars, 200);
+        assert_eq!(slice.chars().count(), 50);
+        assert!(body.starts_with(&slice));
+
+        // Slice past the end clamps to remaining
+        let (_, tail) = db
+            .get_tool_artifact_slice("art_x", 190, 50, &now.to_rfc3339())
+            .unwrap()
+            .unwrap();
+        assert_eq!(tail.chars().count(), 10);
+
+        // Expired artifact returns None
+        let future = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let missing = db.get_tool_artifact_slice("art_x", 0, 10, &future).unwrap();
+        assert!(missing.is_none());
+
+        // Prune removes expired rows
+        let pruned = db.prune_tool_artifacts(&future).unwrap();
+        assert_eq!(pruned, 1);
+        cleanup(&dir);
+    }
+
     #[cfg(feature = "sqlite-vec")]
     #[test]
     fn test_sqlite_vec_prepare_and_knn() {
@@ -6789,6 +8087,132 @@ mod tests {
         assert_eq!(nearest.len(), 1);
         assert_eq!(nearest[0].0, id1);
         assert!(nearest[0].1 >= 0.0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_list_idle_chats() {
+        let (db, dir) = test_db();
+        // Chat 1: last message long ago (idle). Chat 2: recent (active).
+        db.store_message(&StoredMessage {
+            id: "old".into(),
+            chat_id: 1,
+            sender_name: "u".into(),
+            content: "hi".into(),
+            is_from_bot: false,
+            timestamp: "2020-01-01T00:00:00Z".into(),
+        })
+        .unwrap();
+        db.store_message(&StoredMessage {
+            id: "new".into(),
+            chat_id: 2,
+            sender_name: "u".into(),
+            content: "hi".into(),
+            is_from_bot: false,
+            timestamp: "2099-01-01T00:00:00Z".into(),
+        })
+        .unwrap();
+        let idle = db.list_idle_chats("2030-01-01T00:00:00Z", 50).unwrap();
+        assert!(idle.contains(&1));
+        assert!(!idle.contains(&2));
+
+        // Familiarity proxy: message counts per chat.
+        assert_eq!(db.count_messages_for_chat(1).unwrap(), 1);
+        assert_eq!(db.count_messages_for_chat(2).unwrap(), 1);
+        assert_eq!(db.count_messages_for_chat(999).unwrap(), 0);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_subagent_run_label_and_progress() {
+        let (db, dir) = test_db();
+        db.create_subagent_run(CreateSubagentRunParams {
+            run_id: "subrun-1",
+            parent_run_id: None,
+            depth: 1,
+            token_budget: 0,
+            chat_id: 42,
+            caller_channel: "telegram",
+            task: "research competitor pricing",
+            context: "",
+            provider: "anthropic",
+            model: "claude-test",
+            label: Some("competitor research"),
+        })
+        .unwrap();
+
+        // Label round-trips through both get and list.
+        let run = db.get_subagent_run("subrun-1", 42).unwrap().unwrap();
+        assert_eq!(run.label.as_deref(), Some("competitor research"));
+        assert!(run.progress_text.is_none());
+        assert!(run.last_progress_at.is_none());
+        let listed = db.list_subagent_runs(42, 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label.as_deref(), Some("competitor research"));
+
+        // Active-runs query (used by the standup loop) sees the fresh run.
+        let active = db.list_active_subagent_runs().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].run_id, "subrun-1");
+        assert_eq!(active[0].chat_id, 42);
+
+        // Resolve by exact run_id, by label, and a miss.
+        assert_eq!(
+            db.resolve_subagent_run_id(42, "subrun-1").unwrap().as_deref(),
+            Some("subrun-1")
+        );
+        assert_eq!(
+            db.resolve_subagent_run_id(42, "competitor research")
+                .unwrap()
+                .as_deref(),
+            Some("subrun-1")
+        );
+        assert!(db.resolve_subagent_run_id(42, "nope").unwrap().is_none());
+        // Wrong chat → no match.
+        assert!(db.resolve_subagent_run_id(99, "competitor research").unwrap().is_none());
+
+        // Children listing for fan-in: a child of subrun-1.
+        db.create_subagent_run(CreateSubagentRunParams {
+            run_id: "subrun-1a",
+            parent_run_id: Some("subrun-1"),
+            depth: 2,
+            token_budget: 0,
+            chat_id: 42,
+            caller_channel: "telegram",
+            task: "child task",
+            context: "",
+            provider: "anthropic",
+            model: "claude-test",
+            label: Some("child"),
+        })
+        .unwrap();
+        let kids = db.list_subagent_children("subrun-1").unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].run_id, "subrun-1a");
+        assert!(db.list_subagent_children("subrun-1a").unwrap().is_empty());
+
+        // First progress: no previous timestamp.
+        let prev = db
+            .record_subagent_progress("subrun-1", "checked 3/5 sources")
+            .unwrap();
+        assert!(prev.is_none());
+        let run = db.get_subagent_run("subrun-1", 42).unwrap().unwrap();
+        assert_eq!(run.progress_text.as_deref(), Some("checked 3/5 sources"));
+        assert!(run.last_progress_at.is_some());
+
+        // Second progress: returns the prior timestamp (used for throttling) and
+        // appends a second event to the run timeline.
+        let prev2 = db
+            .record_subagent_progress("subrun-1", "checked 5/5 sources")
+            .unwrap();
+        assert!(prev2.is_some());
+        let events = db.list_subagent_events("subrun-1", 50).unwrap();
+        let progress_events = events
+            .iter()
+            .filter(|e| e.event_type == "progress")
+            .count();
+        assert_eq!(progress_events, 2);
 
         cleanup(&dir);
     }

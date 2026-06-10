@@ -135,7 +135,8 @@ pub fn tool_concurrency_class(name: &str) -> ToolConcurrencyClass {
         | "compare_time" | "calculate" | "read_memory" | "structured_memory_search"
         | "todo_read" | "export_chat" | "a2a_list_peers" | "list_scheduled_tasks"
         | "get_scheduled_task_history" | "list_scheduled_task_dlq" | "subagents_list"
-        | "subagents_info" | "subagents_focused" | "subagents_log" | "browser" => {
+        | "subagents_info" | "subagents_focused" | "subagents_log" | "browser"
+        | "fetch_artifact" => {
             ToolConcurrencyClass::ReadOnly
         }
         // Exclusive tools: must run alone
@@ -331,7 +332,7 @@ fn sanitize_channel_segment(channel: &str) -> String {
     }
 }
 
-fn chat_working_dir(base_working_dir: &Path, channel: &str, chat_id: i64) -> PathBuf {
+pub fn chat_working_dir(base_working_dir: &Path, channel: &str, chat_id: i64) -> PathBuf {
     let chat_segment = if chat_id < 0 {
         format!("neg{}", chat_id.unsigned_abs())
     } else {

@@ -3,8 +3,10 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
     groups:
       github-actions-non-major:
         patterns:
@@ -20,8 +22,10 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     groups:
       cargo-non-major:
         patterns:
@@ -37,27 +41,12 @@ updates:
   - package-ecosystem: "npm"
     directory: "/web"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
     groups:
       web-non-major:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-    ignore:
-      - dependency-name: "*"
-        update-types:
-          - "version-update:semver-major"
-
-  - package-ecosystem: "npm"
-    directory: "/website"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 2
-    groups:
-      website-non-major:
         patterns:
           - "*"
         update-types:

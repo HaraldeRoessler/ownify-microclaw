@@ -50,6 +50,119 @@ pub fn unknown_command_response() -> String {
     "Unknown command.".to_string()
 }
 
+/// Render the in-chat command reference. Pure (no `AppState`) so it can be
+/// unit-tested and reused. Backs `/help`.
+pub fn build_help_response() -> String {
+    [
+        "MicroClaw commands",
+        "",
+        "Session & context",
+        "  /status              Session info: provider, model, message & task counts",
+        "  /clear               Clear this chat's session + history (keep scheduled tasks)",
+        "  /reset               Clear this chat's session + history",
+        "  /reset memory        Clear this chat's long-term memory (AGENTS.md)",
+        "  /stop                Abort the run currently in progress",
+        "  /archive             Archive the current session to disk",
+        "",
+        "Model & provider",
+        "  /model [name|reset]  Show or set the model for this chat",
+        "  /models [provider]   List available models",
+        "  /provider [name]     Show or set the provider for this chat",
+        "  /providers           List configured providers",
+        "",
+        "Skills",
+        "  /skills              List available skills",
+        "  /reload-skills       Reload skills from disk",
+        "",
+        "Memory & usage",
+        "  /user [clear]        View or clear your USER.md profile",
+        "  /usage               Token usage report for this chat",
+        "  /rewind [id]         List or restore conversation checkpoints",
+        "",
+        "  /help                Show this message",
+        "",
+        "Tip: in groups, mention me first (e.g. @bot /status).",
+    ]
+    .join("\n")
+}
+
+/// Show or clear the per-chat USER.md user model. Backs the `/user` slash
+/// command. Lives outside `handle_chat_command` so it can be unit-tested
+/// without spinning up the full AppState match arm.
+fn handle_user_command(state: &AppState, caller_channel: &str, chat_id: i64, args: &str) -> String {
+    let args = args.trim();
+    if args == "clear" {
+        match state.memory.clear_chat_user_model(caller_channel, chat_id) {
+            Ok(true) => "USER.md cleared. The reflector will rebuild it on the next tick.".into(),
+            Ok(false) => "No USER.md to clear for this chat.".into(),
+            Err(e) => format!("Failed to clear USER.md: {e}"),
+        }
+    } else if args.is_empty() {
+        match state.memory.read_chat_user_model(caller_channel, chat_id) {
+            Some(content) if !content.trim().is_empty() => {
+                let cap = state.config.user_model_max_chars;
+                let cap_note = if cap == 0 {
+                    "(layer disabled — user_model_max_chars=0)".to_string()
+                } else {
+                    format!("({}/{} chars)", content.chars().count(), cap)
+                };
+                format!("USER.md {cap_note}:\n\n{}", content.trim())
+            }
+            _ => "No USER.md yet — the reflector populates it from PROFILE memories. Send a few personal facts and check back after the next reflector tick.".into(),
+        }
+    } else {
+        "Usage: /user            show current USER.md\n       /user clear     remove USER.md so the reflector rebuilds it".into()
+    }
+}
+
+/// Handle `/rewind` (list checkpoints) or `/rewind <hash>` (restore).
+async fn handle_rewind_command(
+    state: &AppState,
+    caller_channel: &str,
+    chat_id: i64,
+    args: &str,
+) -> String {
+    if !state.config.checkpoints_enabled {
+        return "Checkpoints are disabled. Set `checkpoints_enabled: true` in microclaw.config.yaml \
+                to record per-turn snapshots of this chat's working directory."
+            .into();
+    }
+
+    let working_dir = microclaw_tools::runtime::chat_working_dir(
+        std::path::Path::new(&state.config.working_dir),
+        caller_channel,
+        chat_id,
+    );
+    let shadow_root = std::path::PathBuf::from(&state.config.data_dir).join("checkpoints");
+    let shadow_repo = crate::checkpoint::shadow_repo_path(&shadow_root, &working_dir);
+
+    if args.is_empty() {
+        match crate::checkpoint::list(&shadow_repo, &working_dir, 20).await {
+            Ok(entries) if entries.is_empty() => {
+                "No checkpoints yet — they're created at the start of each agent turn that modifies files."
+                    .into()
+            }
+            Ok(entries) => {
+                let mut out = String::from("Recent checkpoints (newest first):\n\n");
+                for e in entries {
+                    out.push_str(&format!(
+                        "  {}  {}  {}\n",
+                        e.commit, e.timestamp, e.label
+                    ));
+                }
+                out.push_str("\nUse `/rewind <hash>` to restore.");
+                out
+            }
+            Err(e) => format!("Failed to list checkpoints: {e}"),
+        }
+    } else {
+        match crate::checkpoint::restore(&shadow_repo, &working_dir, args).await {
+            Ok(()) => format!("Restored working directory to checkpoint {args}."),
+            Err(e) => format!("Restore failed: {e}"),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PersistedOverride<'a> {
     Unchanged,
@@ -102,6 +215,10 @@ pub async fn handle_chat_command(
 ) -> Option<String> {
     let trimmed = normalized_slash_command(command_text)?.trim();
 
+    if trimmed == "/help" || trimmed == "/commands" || trimmed == "/?" {
+        return Some(build_help_response());
+    }
+
     if trimmed == "/reset memory" {
         let _ = call_blocking(state.db.clone(), move |db| db.clear_chat_memory(chat_id)).await;
         let groups_dir = std::path::PathBuf::from(&state.config.data_dir).join("groups");
@@ -153,6 +270,14 @@ pub async fn handle_chat_command(
 
     if trimmed == "/skills" {
         return Some(state.skills.list_skills_formatted());
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/rewind") {
+        return Some(handle_rewind_command(state, caller_channel, chat_id, rest.trim()).await);
+    }
+
+    if let Some(args) = trimmed.strip_prefix("/user") {
+        return Some(handle_user_command(state, caller_channel, chat_id, args));
     }
 
     if trimmed == "/reload-skills" {
@@ -1504,7 +1629,7 @@ channels:
 
 #[cfg(test)]
 mod slash_command_tests {
-    use super::is_slash_command;
+    use super::{build_help_response, is_slash_command};
 
     #[test]
     fn test_is_slash_command_with_leading_mentions() {
@@ -1513,5 +1638,19 @@ mod slash_command_tests {
         assert!(is_slash_command("<@U123> /status"));
         assert!(is_slash_command(" <@U123>   @bot   /status"));
         assert!(!is_slash_command("@bot hello"));
+    }
+
+    #[test]
+    fn help_lists_real_commands_and_is_recognized() {
+        assert!(is_slash_command("/help"));
+        let help = build_help_response();
+        // Every command surfaced in help must be a real dispatch entry.
+        for cmd in [
+            "/status", "/clear", "/reset", "/stop", "/archive", "/model", "/models",
+            "/provider", "/providers", "/skills", "/reload-skills", "/user", "/usage",
+            "/rewind", "/help",
+        ] {
+            assert!(help.contains(cmd), "help missing {cmd}");
+        }
     }
 }

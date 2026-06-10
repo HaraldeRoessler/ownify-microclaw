@@ -28,9 +28,14 @@ use crate::runtime::AppState;
 use crate::setup_def::{ChannelFieldDef, DynamicChannelDef};
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
+use microclaw_core::text::split_text;
 use microclaw_storage::db::{call_blocking, StoredMessage};
 
 const CHANNEL_KEY: &str = "weixin";
+/// Max bytes per outbound Weixin text item. The ilink `sendmessage` API
+/// silently truncates anything longer, so long replies are split into
+/// multiple messages at newline boundaries (see `split_text`).
+const WEIXIN_TEXT_MAX_LEN: usize = 2048;
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 const DEFAULT_WEBHOOK_PATH: &str = "/weixin/messages";
@@ -1945,15 +1950,22 @@ impl ChannelAdapter for WeixinAdapter {
             )
         })?;
         let account = self.load_native_account()?;
-        send_text_message_native(
-            &self.http_client,
-            &account,
-            external_chat_id,
-            text,
-            &context_token,
-        )
-        .await
-        .map(|_| ())
+        // The ilink sendmessage API truncates over-long text items, so split
+        // long replies into multiple messages like the other channel adapters.
+        for chunk in split_text(text, WEIXIN_TEXT_MAX_LEN) {
+            if chunk.is_empty() {
+                continue;
+            }
+            send_text_message_native(
+                &self.http_client,
+                &account,
+                external_chat_id,
+                &chunk,
+                &context_token,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn send_attachment(
@@ -2400,7 +2412,28 @@ async fn process_weixin_inbound_message(
         None
     };
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    // Live event tap: echo MidTurnInjection acks and detect send_message
+    // tool usage concurrently with the running agent loop.
+    let injection_ack: Option<crate::channels::event_tap::InjectionAck> =
+        if app_state.config.mid_turn_injection_echo {
+            let runtime_for_tap = runtime_ctx.clone();
+            let sender_for_tap = sender.clone();
+            Some(Box::new(move |count| {
+                let runtime = runtime_for_tap.clone();
+                let sender = sender_for_tap.clone();
+                Box::pin(async move {
+                    let text = crate::channels::event_tap::mid_turn_injection_ack_text(count);
+                    let adapter = WeixinAdapter::from_runtime(&runtime);
+                    if let Err(e) = adapter.send_text(&sender, &text).await {
+                        warn!("Weixin: failed to send mid-turn injection ack: {e}");
+                    }
+                })
+            }))
+        } else {
+            None
+        };
+    let mut tap = crate::channels::event_tap::EventTap::spawn(event_rx, injection_ack);
     match process_with_agent_with_events(
         &app_state,
         AgentRequestContext {
@@ -2428,14 +2461,12 @@ async fn process_weixin_inbound_message(
                 .await;
             }
             drop(event_tx);
-            let mut used_send_message_tool = false;
-            while let Some(event) = event_rx.recv().await {
-                if let AgentEvent::ToolStart { name, .. } = event {
-                    if name == "send_message" {
-                        used_send_message_tool = true;
-                    }
-                }
-            }
+            while tap.replay_rx.recv().await.is_some() {}
+            let used_send_message_tool = tap
+                .join
+                .await
+                .map(|r| r.used_send_message_tool)
+                .unwrap_or(false);
             let adapter = WeixinAdapter::from_runtime(&runtime_ctx);
             if used_send_message_tool {
                 if !response.is_empty() {

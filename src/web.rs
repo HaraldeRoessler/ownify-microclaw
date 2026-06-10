@@ -2364,6 +2364,7 @@ mod tests {
             memory_backend: memory_backend.clone(),
             tools: ToolRegistry::new(&cfg, channel_registry, db, memory_backend),
             chat_turn_queue: Arc::new(crate::chat_turn_queue::ChatTurnQueue::new(20)),
+            skill_review_queue: crate::skill_review::build_skill_review_channel().0,
             metric_exporter: None,
             trace_exporter: None,
             log_exporter: None,
@@ -2409,7 +2410,8 @@ mod tests {
     async fn seed_test_api_key_with_scopes(state: &WebState, secret: &str, scopes: &[String]) {
         let secret_owned = secret.to_string();
         let key_hash = sha256_hex(&secret_owned);
-        let prefix = secret_owned[..secret_owned.len().min(6)].to_string();
+        let safe_end = microclaw_core::text::floor_char_boundary(&secret_owned, 6);
+        let prefix = secret_owned[..safe_end].to_string();
         let scopes = scopes.to_vec();
         call_blocking(state.app_state.db.clone(), move |db| {
             db.upsert_auth_password_hash(&make_password_hash("passw0rd!"))?;

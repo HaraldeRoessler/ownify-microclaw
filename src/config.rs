@@ -99,6 +99,54 @@ fn default_memory_max_global_entries() -> usize {
 fn default_kg_max_triples_per_chat() -> usize {
     1000
 }
+fn default_tool_result_truncation_threshold_chars() -> usize {
+    4000
+}
+fn default_tool_result_truncation_head_chars() -> usize {
+    1500
+}
+fn default_tool_result_truncation_tail_chars() -> usize {
+    500
+}
+fn default_tool_result_artifact_ttl_hours() -> u64 {
+    24
+}
+fn default_memory_recency_half_life_days() -> f64 {
+    30.0
+}
+fn default_memory_graph_recall_enabled() -> bool {
+    true
+}
+fn default_memory_graph_max_hops() -> usize {
+    2
+}
+fn default_memory_graph_max_triples() -> usize {
+    10
+}
+fn default_tool_repeat_window() -> usize {
+    10
+}
+fn default_tool_repeat_limit() -> usize {
+    3
+}
+fn default_anthropic_prompt_cache_enabled() -> bool {
+    true
+}
+fn default_anthropic_prompt_cache_ttl() -> String {
+    "5m".to_string()
+}
+fn default_checkpoints_enabled() -> bool {
+    false
+}
+fn default_skill_archive_after_days() -> u64 {
+    30
+}
+fn default_skills_catalog_top_k() -> usize {
+    3
+}
+fn default_skill_review_min_tool_calls() -> usize {
+    5
+}
 fn default_data_dir() -> String {
     default_data_root().to_string_lossy().to_string()
 }
@@ -128,6 +176,24 @@ fn default_working_dir() -> String {
 }
 fn default_working_dir_isolation() -> WorkingDirIsolation {
     WorkingDirIsolation::Chat
+}
+fn default_bash_dangerous_patterns() -> Vec<String> {
+    vec![
+        // Destructive recursive deletes against root or wildcards.
+        r"\brm\s+(-[a-zA-Z]*[rfRF][a-zA-Z]*\s+)+(/|\*|~|\$HOME)".into(),
+        // Pipe-to-shell installer pattern.
+        r"\b(curl|wget|fetch)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|fish)\b".into(),
+        // Privilege escalation.
+        r"\bsudo\b".into(),
+        // Disk-overwrite.
+        r"\bdd\s+if=".into(),
+        // Forkbomb.
+        r":\(\)\s*\{\s*:\s*\|\s*:&\s*\}\s*;\s*:".into(),
+        // Filesystem format.
+        r"\bmkfs(\.[a-z0-9]+)?\b".into(),
+        // Recursive chmod/chown on root.
+        r"\bch(mod|own)\s+-R\s+[^/]*\s+/(\s|$)".into(),
+    ]
 }
 fn default_high_risk_tool_user_confirmation_required() -> bool {
     true
@@ -205,6 +271,9 @@ fn default_subagent_run_timeout_secs() -> u64 {
 fn default_subagent_announce() -> bool {
     true
 }
+fn default_subagent_progress_min_interval_secs() -> u64 {
+    45
+}
 fn default_subagent_max_spawn_depth() -> usize {
     1
 }
@@ -244,6 +313,12 @@ fn default_soul_path() -> Option<String> {
 }
 fn default_souls_dir() -> Option<String> {
     None
+}
+fn default_context_max_chars() -> usize {
+    8000
+}
+fn default_user_model_max_chars() -> usize {
+    1500
 }
 fn default_clawhub_registry() -> String {
     "https://clawhub.ai".into()
@@ -292,6 +367,182 @@ pub struct ModelPrice {
     pub model: String,
     pub input_per_million_usd: f64,
     pub output_per_million_usd: f64,
+}
+
+/// Configuration for multimedia tools (image generation, vision, TTS, STT).
+///
+/// All four tools are **disabled by default** — operators opt in per-tool.
+/// Credential resolution order for each tool (first non-empty wins):
+/// 1. `media.api_key` (plaintext in config; discouraged but supported)
+/// 2. Environment variable `MICROCLAW_OPENAI_API_KEY`
+/// 3. Environment variable `OPENAI_API_KEY`
+/// 4. `config.openai_api_key` (existing top-level field; used by transcribe)
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct MediaConfig {
+    /// Optional explicit API key. Prefer env vars (`MICROCLAW_OPENAI_API_KEY`
+    /// or `OPENAI_API_KEY`) over plaintext here.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Optional per-module base URL override. Falls back to `openai_base_url`
+    /// then to `https://api.openai.com/v1`.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Extra directories that `describe_image` / `transcribe_audio` may read
+    /// from, beyond the working_dir default. Absolute paths only. Empty by
+    /// default — matches the previous working-dir-only behavior.
+    #[serde(default)]
+    pub allowed_read_dirs: Vec<String>,
+    #[serde(default)]
+    pub image_gen: ImageGenConfig,
+    #[serde(default)]
+    pub vision: VisionConfig,
+    #[serde(default)]
+    pub tts: TtsConfig,
+    #[serde(default)]
+    pub stt: SttConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageGenConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_image_model")]
+    pub model: String,
+    #[serde(default = "default_image_size")]
+    pub default_size: String,
+}
+
+impl Default for ImageGenConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_image_model(),
+            default_size: default_image_size(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VisionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_vision_model")]
+    pub model: String,
+    #[serde(default = "default_vision_max_tokens")]
+    pub max_tokens: u32,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_vision_model(),
+            max_tokens: default_vision_max_tokens(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TtsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_tts_model")]
+    pub model: String,
+    #[serde(default = "default_tts_voice")]
+    pub default_voice: String,
+    #[serde(default = "default_tts_format")]
+    pub default_format: String,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_tts_model(),
+            default_voice: default_tts_voice(),
+            default_format: default_tts_format(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SttConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_stt_model")]
+    pub model: String,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_stt_model(),
+            language: None,
+        }
+    }
+}
+
+fn default_image_model() -> String {
+    "gpt-image-1".into()
+}
+fn default_image_size() -> String {
+    "1024x1024".into()
+}
+fn default_vision_model() -> String {
+    "gpt-4o-mini".into()
+}
+fn default_vision_max_tokens() -> u32 {
+    1024
+}
+fn default_tts_model() -> String {
+    "tts-1".into()
+}
+fn default_tts_voice() -> String {
+    "alloy".into()
+}
+fn default_tts_format() -> String {
+    "mp3".into()
+}
+fn default_stt_model() -> String {
+    "whisper-1".into()
+}
+
+impl MediaConfig {
+    /// Resolve the API key using the documented priority order. Returns
+    /// `None` if no source is configured. Never logs the value.
+    pub fn resolve_api_key(&self, fallback_openai_key: Option<&str>) -> Option<String> {
+        if let Some(k) = self.api_key.as_deref().filter(|s| !s.trim().is_empty()) {
+            return Some(k.to_string());
+        }
+        if let Ok(k) = std::env::var("MICROCLAW_OPENAI_API_KEY") {
+            if !k.trim().is_empty() {
+                return Some(k);
+            }
+        }
+        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+            if !k.trim().is_empty() {
+                return Some(k);
+            }
+        }
+        fallback_openai_key
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+    }
+
+    /// Resolve the base URL using the documented priority order. Always
+    /// returns a non-empty value (defaults to OpenAI).
+    pub fn resolve_base_url(&self, fallback: Option<&str>) -> String {
+        if let Some(u) = self.base_url.as_deref().filter(|s| !s.trim().is_empty()) {
+            return u.trim_end_matches('/').to_string();
+        }
+        if let Some(u) = fallback.filter(|s| !s.trim().is_empty()) {
+            return u.trim_end_matches('/').to_string();
+        }
+        "https://api.openai.com/v1".to_string()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -525,6 +776,74 @@ impl SubagentAcpConfig {
     }
 }
 
+/// Per-task auxiliary model overrides.
+///
+/// Each slot names a (typically cheaper) model used for a specific ancillary task
+/// instead of the main conversation model. Auxiliary models run on the *same*
+/// provider profile and credentials as the main model — only the model name is
+/// swapped — so the common case (e.g. a small/fast model for summarization) needs
+/// no extra provider configuration. An empty or unset slot falls back to the main
+/// model, so the default behavior is unchanged.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AuxModels {
+    /// Model used for context compaction / history summarization. Falls back to the
+    /// main model when unset or empty.
+    #[serde(default)]
+    pub compaction: Option<String>,
+    /// Model used by the background memory reflector (fact/triple extraction). This
+    /// runs periodically per active chat, so a cheaper model here is pure savings.
+    /// Falls back to the main model when unset or empty.
+    #[serde(default)]
+    pub reflector: Option<String>,
+    /// Model used to generate short session titles. This is a one-shot
+    /// summarization, so a cheaper model is pure savings. Falls back to the
+    /// provider's default model when unset or empty.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Model used for image description (the `describe_image` tool). Overrides
+    /// `media.vision.model` when set; falls back to it when unset or empty.
+    #[serde(default)]
+    pub vision: Option<String>,
+}
+
+impl AuxModels {
+    /// Resolve the model to use for context compaction, falling back to `main` when
+    /// no auxiliary model is configured.
+    pub fn compaction_model<'a>(&'a self, main: &'a str) -> &'a str {
+        match self.compaction.as_deref() {
+            Some(m) if !m.trim().is_empty() => m,
+            _ => main,
+        }
+    }
+
+    /// Optional model override for the memory reflector. Returns `None` (use the
+    /// provider's default model) when unset or empty, preserving prior behavior.
+    pub fn reflector_model(&self) -> Option<&str> {
+        match self.reflector.as_deref() {
+            Some(m) if !m.trim().is_empty() => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Optional model override for session-title generation. Returns `None` (use
+    /// the provider's default model) when unset or empty, preserving prior behavior.
+    pub fn title_model(&self) -> Option<&str> {
+        match self.title.as_deref() {
+            Some(m) if !m.trim().is_empty() => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Optional model override for image description. Returns `None` (use
+    /// `media.vision.model`) when unset or empty, preserving prior behavior.
+    pub fn vision_model(&self) -> Option<&str> {
+        match self.vision.as_deref() {
+            Some(m) if !m.trim().is_empty() => Some(m),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubagentConfig {
     #[serde(default = "default_subagent_max_concurrent")]
@@ -535,6 +854,12 @@ pub struct SubagentConfig {
     pub run_timeout_secs: u64,
     #[serde(default = "default_subagent_announce")]
     pub announce_to_chat: bool,
+    #[serde(default)]
+    pub fan_in_summary: bool,
+    #[serde(default = "default_true")]
+    pub progress_reports: bool,
+    #[serde(default = "default_subagent_progress_min_interval_secs")]
+    pub progress_min_interval_secs: u64,
     #[serde(default = "default_subagent_max_spawn_depth")]
     pub max_spawn_depth: usize,
     #[serde(default = "default_subagent_max_children_per_run")]
@@ -549,6 +874,8 @@ pub struct SubagentConfig {
     pub orchestrate_max_workers: usize,
     #[serde(default)]
     pub acp: SubagentAcpConfig,
+    #[serde(default)]
+    pub standup: SubagentStandupConfig,
 }
 
 impl Default for SubagentConfig {
@@ -558,6 +885,9 @@ impl Default for SubagentConfig {
             max_active_per_chat: default_subagent_max_active_per_chat(),
             run_timeout_secs: default_subagent_run_timeout_secs(),
             announce_to_chat: default_subagent_announce(),
+            fan_in_summary: false,
+            progress_reports: true,
+            progress_min_interval_secs: default_subagent_progress_min_interval_secs(),
             max_spawn_depth: default_subagent_max_spawn_depth(),
             max_children_per_run: default_subagent_max_children_per_run(),
             thread_bound_routing_enabled: default_subagent_thread_bound_routing_enabled(),
@@ -565,6 +895,146 @@ impl Default for SubagentConfig {
             max_tokens_per_run: default_subagent_max_tokens_per_run(),
             orchestrate_max_workers: default_subagent_orchestrate_max_workers(),
             acp: SubagentAcpConfig::default(),
+            standup: SubagentStandupConfig::default(),
+        }
+    }
+}
+
+fn default_subagent_standup_interval_secs() -> u64 {
+    1800
+}
+
+/// Proactive task-standup: periodically post a one-line status for tasks that
+/// have been running a while. Off by default — it sends unprompted messages.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubagentStandupConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_subagent_standup_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for SubagentStandupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_subagent_standup_interval_secs(),
+        }
+    }
+}
+
+fn default_sleep_time_idle_hours() -> u64 {
+    6
+}
+fn default_sleep_time_min_interval_hours() -> u64 {
+    24
+}
+fn default_sleep_time_similarity_threshold() -> f64 {
+    0.82
+}
+fn default_sleep_time_max_archived_per_pass() -> usize {
+    20
+}
+
+/// "Sleep-time" memory consolidation: when a chat has been idle for a while, run a
+/// background, deterministic (no-LLM) pass that archives near-duplicate memories so
+/// the store stops accumulating redundancy between reflector runs. PROFILE memories
+/// are never touched, archiving is reversible, and the pass is capped and throttled.
+/// OFF by default. First slice of the v0.3.0 "Self-Improving Runtime" sleep-time
+/// consolidation (Pillar 1c).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SleepTimeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Only consolidate a chat after this many hours with no messages.
+    #[serde(default = "default_sleep_time_idle_hours")]
+    pub idle_hours: u64,
+    /// At most one consolidation pass per chat per this many hours.
+    #[serde(default = "default_sleep_time_min_interval_hours")]
+    pub min_interval_hours: u64,
+    /// Jaccard similarity at/above which two same-category memories are treated as
+    /// duplicates (the lower-confidence one is archived). Clamped to [0.5, 1.0].
+    #[serde(default = "default_sleep_time_similarity_threshold")]
+    pub similarity_threshold: f64,
+    /// Safety cap on how many memories a single pass may archive per chat.
+    #[serde(default = "default_sleep_time_max_archived_per_pass")]
+    pub max_archived_per_pass: usize,
+}
+
+impl Default for SleepTimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_hours: default_sleep_time_idle_hours(),
+            min_interval_hours: default_sleep_time_min_interval_hours(),
+            similarity_threshold: default_sleep_time_similarity_threshold(),
+            max_archived_per_pass: default_sleep_time_max_archived_per_pass(),
+        }
+    }
+}
+
+fn default_idle_checkin_idle_hours() -> u64 {
+    24
+}
+fn default_idle_checkin_min_interval_hours() -> u64 {
+    24
+}
+
+/// Proactive "long-silence" check-in: after a chat has been quiet for a while,
+/// optionally let the bot reach out IF it has something genuinely useful to say
+/// (a pending follow-up, a due reminder). OFF by default — it is outward-facing
+/// and uses an LLM call per idle chat.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdleCheckinConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Only consider a chat idle after this many hours with no messages.
+    #[serde(default = "default_idle_checkin_idle_hours")]
+    pub idle_hours: u64,
+    /// At most one check-in per chat per this many hours.
+    #[serde(default = "default_idle_checkin_min_interval_hours")]
+    pub min_interval_hours: u64,
+}
+
+impl Default for IdleCheckinConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_hours: default_idle_checkin_idle_hours(),
+            min_interval_hours: default_idle_checkin_min_interval_hours(),
+        }
+    }
+}
+
+fn default_interjection_min_interval_secs() -> u64 {
+    900
+}
+fn default_interjection_lookback_mins() -> u64 {
+    10
+}
+
+/// "Inner thoughts" interjection: in an active group chat where the bot was NOT
+/// addressed, occasionally evaluate whether it has a genuinely valuable thing to
+/// say and, if so, chime in once. OFF by default — it speaks unprompted in
+/// group conversations and uses an LLM call per evaluation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InterjectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum seconds between unprompted interjections per chat.
+    #[serde(default = "default_interjection_min_interval_secs")]
+    pub min_interval_secs: u64,
+    /// Only consider chats with non-bot messages in the last this-many minutes.
+    #[serde(default = "default_interjection_lookback_mins")]
+    pub lookback_mins: u64,
+}
+
+impl Default for InterjectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_interval_secs: default_interjection_min_interval_secs(),
+            lookback_mins: default_interjection_lookback_mins(),
         }
     }
 }
@@ -635,6 +1105,10 @@ pub struct Config {
     pub max_tool_iterations: usize,
     #[serde(default = "default_compaction_timeout_secs")]
     pub compaction_timeout_secs: u64,
+    /// Optional per-task auxiliary model overrides (e.g. a cheaper model for
+    /// compaction). Empty by default, in which case the main model is used.
+    #[serde(default)]
+    pub aux_models: AuxModels,
     #[serde(default = "default_max_history_messages")]
     pub max_history_messages: usize,
     #[serde(default = "default_max_document_size_mb")]
@@ -654,6 +1128,84 @@ pub struct Config {
     /// Maximum active triples per chat in the knowledge graph. 0 = unlimited. Default: 1000.
     #[serde(default = "default_kg_max_triples_per_chat")]
     pub kg_max_triples_per_chat: usize,
+    /// Tool-result content over this many Unicode characters is truncated in
+    /// the message history and the full body is stored as an artifact the
+    /// agent can read via `fetch_artifact`. Set to 0 to disable. Default: 4000.
+    #[serde(default = "default_tool_result_truncation_threshold_chars")]
+    pub tool_result_truncation_threshold_chars: usize,
+    /// When truncating, keep this many leading characters of the original
+    /// content in the message history. Default: 1500.
+    #[serde(default = "default_tool_result_truncation_head_chars")]
+    pub tool_result_truncation_head_chars: usize,
+    /// When truncating, keep this many trailing characters (so the agent
+    /// still sees errors/summaries that often live at the end). Default: 500.
+    #[serde(default = "default_tool_result_truncation_tail_chars")]
+    pub tool_result_truncation_tail_chars: usize,
+    /// Lifetime for stashed tool-result artifacts before they're pruned.
+    /// Long enough to span a typical multi-turn task. Default: 24 hours.
+    #[serde(default = "default_tool_result_artifact_ttl_hours")]
+    pub tool_result_artifact_ttl_hours: u64,
+    /// Half-life (in days) of the recency-decay multiplier applied to
+    /// non-PROFILE memories during L1/L2 ranking. After `half_life_days`,
+    /// a memory's effective score is half of its raw confidence; PROFILE
+    /// memories never decay. Set to 0 to disable decay. Default: 30.
+    #[serde(default = "default_memory_recency_half_life_days")]
+    pub memory_recency_half_life_days: f64,
+    /// Graph-augmented memory recall: after the flat L0-L2 layers are built,
+    /// seed the temporal knowledge graph from entities the query mentions and
+    /// pull in connected facts a few hops out (a "# Connected" block). Surfaces
+    /// multi-hop context the flat layers miss, using the graph the reflector
+    /// already builds — local-only, no embeddings or extra LLM calls. Default: true.
+    #[serde(default = "default_memory_graph_recall_enabled")]
+    pub memory_graph_recall_enabled: bool,
+    /// Maximum hops to expand outward from query-seeded entities during
+    /// graph-augmented recall. Clamped to 1-3. Default: 2.
+    #[serde(default = "default_memory_graph_max_hops")]
+    pub memory_graph_max_hops: usize,
+    /// Maximum number of connected triples injected by graph-augmented recall
+    /// (also bounded by the overall memory token budget). Set to 0 to disable.
+    /// Default: 10.
+    #[serde(default = "default_memory_graph_max_triples")]
+    pub memory_graph_max_triples: usize,
+    /// Sliding-window size (in past tool calls) used by the duplicate-call
+    /// circuit breaker. When the same `(tool_name, args)` shows up
+    /// `tool_repeat_limit` times within this many recent calls, the next
+    /// invocation is short-circuited with an error so the agent picks a
+    /// different approach. Set to 0 to disable. Default: 10.
+    #[serde(default = "default_tool_repeat_window")]
+    pub tool_repeat_window: usize,
+    /// Repeat threshold for the duplicate-call circuit breaker. Default: 3.
+    #[serde(default = "default_tool_repeat_limit")]
+    pub tool_repeat_limit: usize,
+    /// Enable Anthropic prompt-cache breakpoints (system + last 3 messages).
+    /// Cuts repeat-turn input cost ~75% for multi-turn chats. Anthropic-only;
+    /// no effect on OpenAI-compatible providers. Default: true.
+    #[serde(default = "default_anthropic_prompt_cache_enabled")]
+    pub anthropic_prompt_cache_enabled: bool,
+    /// Cache TTL for Anthropic prompt cache. "5m" (default) or "1h".
+    /// "1h" requires extended-cache opt-in on the API key.
+    #[serde(default = "default_anthropic_prompt_cache_ttl")]
+    pub anthropic_prompt_cache_ttl: String,
+    /// Enable transparent filesystem checkpoints via a shadow git repo.
+    /// When on, microclaw snapshots each chat's working directory at the
+    /// start of every agent turn so users can `/rewind` to a prior state.
+    /// Off by default — opt in per chat or via global config. Requires `git`
+    /// on PATH.
+    #[serde(default = "default_checkpoints_enabled")]
+    pub checkpoints_enabled: bool,
+    /// Auto-archive `agent-created` skills that haven't been activated in
+    /// this many days and are themselves at least this old. The skill dir
+    /// is moved under `<skills_dir>/.archived/` (recoverable). Set to 0
+    /// to disable. Default: 30 days.
+    #[serde(default = "default_skill_archive_after_days")]
+    pub skill_archive_after_days: u64,
+    /// When building the skills section of the system prompt, inline the
+    /// full body of the top-K skills whose descriptions match the user
+    /// query and list the rest as `name: description` only. Cuts prompt
+    /// cost as the skill library grows. Set to 0 to fall back to the
+    /// flat catalog. Default: 3.
+    #[serde(default = "default_skills_catalog_top_k")]
+    pub skills_catalog_top_k: usize,
     #[serde(default = "default_max_session_messages")]
     pub max_session_messages: usize,
     #[serde(default = "default_compact_keep_recent")]
@@ -669,6 +1221,12 @@ pub struct Config {
     #[serde(default)]
     pub subagents: SubagentConfig,
     #[serde(default)]
+    pub idle_checkin: IdleCheckinConfig,
+    #[serde(default)]
+    pub sleep_time: SleepTimeConfig,
+    #[serde(default)]
+    pub interjection: InterjectionConfig,
+    #[serde(default)]
     pub a2a: A2AConfig,
 
     // --- Concurrency ---
@@ -679,6 +1237,11 @@ pub struct Config {
     /// rather than queuing them for a separate re-run. Default: true.
     #[serde(default = "default_true")]
     pub enable_mid_turn_injection: bool,
+    /// On non-web channels (Telegram/Discord/Slack), send a small ack message
+    /// when a follow-up arrives mid-turn and is folded into the active loop.
+    /// Default: true. Has no effect when `enable_mid_turn_injection` is false.
+    #[serde(default = "default_true")]
+    pub mid_turn_injection_echo: bool,
     /// Maximum number of tools to execute concurrently in a single wave.
     #[serde(default = "default_parallel_tool_max_concurrency")]
     pub parallel_tool_max_concurrency: usize,
@@ -710,6 +1273,14 @@ pub struct Config {
     pub working_dir_isolation: WorkingDirIsolation,
     #[serde(default = "default_high_risk_tool_user_confirmation_required")]
     pub high_risk_tool_user_confirmation_required: bool,
+    /// Regex patterns that always require operator approval before bash will
+    /// run, even in non-control chats. Extends the per-chat risk policy with
+    /// command-content inspection so destructive shell snippets cannot slip
+    /// through just because the caller happens to be in a permissive chat.
+    /// Patterns are matched case-insensitively against the full command
+    /// string. Set to an empty list to disable command-content gating.
+    #[serde(default = "default_bash_dangerous_patterns")]
+    pub bash_dangerous_patterns: Vec<String>,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -772,9 +1343,10 @@ pub struct Config {
     pub reflector_enabled: bool,
     #[serde(default = "default_reflector_interval_mins")]
     pub reflector_interval_mins: u64,
-    /// Minimum number of tool calls in a conversation before skill review is triggered.
-    /// Set to 0 to disable autonomous skill creation. Default: 0 (disabled).
-    #[serde(default)]
+    /// Minimum tool_use blocks in a turn before the end-of-turn skill
+    /// review fires. Autonomous skill creation is on by default; set to
+    /// 0 to disable entirely. Default: 5.
+    #[serde(default = "default_skill_review_min_tool_calls")]
     pub skill_review_min_tool_calls: usize,
 
     // --- Soul ---
@@ -786,6 +1358,39 @@ pub struct Config {
     #[serde(default = "default_souls_dir")]
     pub souls_dir: Option<String>,
 
+    // --- Project context files ---
+    /// Directory of project-level context Markdown files injected into the
+    /// system prompt for every chat. Use this for workspace-wide facts that
+    /// belong above per-chat memory but are not personality (which lives in
+    /// SOUL.md). Defaults to `<data_dir>/context/` when unset; missing
+    /// directories are silently skipped.
+    #[serde(default)]
+    pub context_dir: Option<String>,
+    /// Hard cap (in characters) on the combined size of all loaded context
+    /// files, to keep prefix-cache friendly system prompts from blowing up.
+    /// Set to 0 to disable the project-context layer entirely.
+    #[serde(default = "default_context_max_chars")]
+    pub context_max_chars: usize,
+
+    // --- Per-chat user model (USER.md) ---
+    /// When a turn was triggered by an inbound voice message and this is
+    /// true, the bot's text reply is also rendered to audio via the TTS
+    /// layer and sent back through the same channel. Off by default — opt
+    /// in explicitly because each round trip burns one extra TTS call.
+    /// Has no effect unless `media.tts.enabled` is also true.
+    #[serde(default)]
+    pub voice_round_trip: bool,
+
+    /// Hard cap on USER.md size. Hermes ships a 1375-char limit on its
+    /// equivalent file to force the curator to summarize rather than append.
+    /// Set to 0 to disable the user-model layer entirely; the chat falls
+    /// back to PROFILE memories alone. Curation is folded into the
+    /// reflector LLM call (see scheduler.rs), so there is no per-tick
+    /// amortization knob: the LLM itself returns null when no rewrite is
+    /// warranted.
+    #[serde(default = "default_user_model_max_chars")]
+    pub user_model_max_chars: usize,
+
     // --- ClawHub ---
     #[serde(flatten)]
     pub clawhub: ClawHubConfig,
@@ -793,6 +1398,19 @@ pub struct Config {
     // --- Plugins ---
     #[serde(default)]
     pub plugins: PluginsConfig,
+
+    // --- Media tools (OpenAI-compatible) ---
+    /// Multimedia tool configuration (image generation / vision / TTS / STT).
+    /// When unset, each tool defaults to `enabled: false`. API key and base URL
+    /// fall back to `openai_api_key` / `openai_base_url`, so users who already
+    /// have their OpenAI credential wired up get zero-config.
+    #[serde(default)]
+    pub media: MediaConfig,
+
+    /// Override for the OpenAI-compatible base URL used by media tools. When
+    /// unset, media tools use `https://api.openai.com/v1`.
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
 
     // --- Voice / Speech-to-text ---
     /// Voice transcription provider: "openai" uses OpenAI Whisper API, "local" uses voice_transcription_command
@@ -1214,6 +1832,7 @@ impl Config {
             max_tokens: 8192,
             max_tool_iterations: 100,
             compaction_timeout_secs: 180,
+            aux_models: AuxModels::default(),
             max_history_messages: 50,
             max_document_size_mb: 100,
             memory_token_budget: 1500,
@@ -1222,11 +1841,27 @@ impl Config {
             memory_max_entries_per_chat: 200,
             memory_max_global_entries: 500,
             kg_max_triples_per_chat: 1000,
+            tool_result_truncation_threshold_chars: 4000,
+            tool_result_truncation_head_chars: 1500,
+            tool_result_truncation_tail_chars: 500,
+            tool_result_artifact_ttl_hours: 24,
+            memory_recency_half_life_days: 30.0,
+            memory_graph_recall_enabled: true,
+            memory_graph_max_hops: 2,
+            memory_graph_max_triples: 10,
+            tool_repeat_window: 10,
+            tool_repeat_limit: 3,
+            anthropic_prompt_cache_enabled: true,
+            anthropic_prompt_cache_ttl: "5m".into(),
+            checkpoints_enabled: false,
+            skill_archive_after_days: 30,
+            skills_catalog_top_k: 3,
             data_dir: default_data_dir(),
             skills_dir: None,
             working_dir: default_working_dir(),
             working_dir_isolation: WorkingDirIsolation::Chat,
             high_risk_tool_user_confirmation_required: true,
+            bash_dangerous_patterns: default_bash_dangerous_patterns(),
             sandbox: SandboxConfig::default(),
             openai_api_key: None,
             override_timezone: None,
@@ -1244,6 +1879,9 @@ impl Config {
             allow_group_slash_without_mention: false,
             show_thinking: false,
             subagents: SubagentConfig::default(),
+            idle_checkin: IdleCheckinConfig::default(),
+            sleep_time: SleepTimeConfig::default(),
+            interjection: InterjectionConfig::default(),
             a2a: A2AConfig::default(),
             openai_compat_body_overrides: HashMap::new(),
             openai_compat_body_overrides_by_provider: HashMap::new(),
@@ -1266,11 +1904,17 @@ impl Config {
             embedding_dim: None,
             reflector_enabled: true,
             reflector_interval_mins: 15,
-            skill_review_min_tool_calls: 0,
+            skill_review_min_tool_calls: 5,
             soul_path: None,
             souls_dir: None,
+            context_dir: None,
+            context_max_chars: 8000,
+            user_model_max_chars: 1500,
+            voice_round_trip: false,
             clawhub: ClawHubConfig::default(),
             plugins: PluginsConfig::default(),
+            media: MediaConfig::default(),
+            openai_base_url: None,
             voice_provider: "openai".into(),
             voice_transcription_command: None,
             voice_rtc_url: default_voice_rtc_url(),
@@ -1279,6 +1923,7 @@ impl Config {
             channels: HashMap::new(),
             chat_turn_queue_max_pending: 20,
             enable_mid_turn_injection: true,
+            mid_turn_injection_echo: true,
             parallel_tool_max_concurrency: 8,
             tool_concurrency_overrides: HashMap::new(),
         }
@@ -1411,6 +2056,47 @@ impl Config {
         self.inferred_channel_enabled(&needle)
     }
 
+    /// Classify every known channel into `(enabled, configured_but_disabled)`.
+    /// A channel is "configured" when it has credentials/config present (a
+    /// `channels.<name>` block or a legacy top-level token); it is "enabled"
+    /// per [`channel_enabled`]. Used both for the no-channel config error and
+    /// for `microclaw doctor`, so the two stay consistent.
+    pub fn channel_status(&self) -> (Vec<&'static str>, Vec<&'static str>) {
+        let configured = [
+            (
+                "telegram",
+                !self.telegram_bot_token.trim().is_empty()
+                    || self.channels.contains_key("telegram"),
+            ),
+            (
+                "discord",
+                self.discord_bot_token
+                    .as_deref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+                    || self.channels.contains_key("discord"),
+            ),
+            ("slack", self.channels.contains_key("slack")),
+            ("feishu", self.channels.contains_key("feishu")),
+            ("matrix", self.channels.contains_key("matrix")),
+            ("irc", self.channels.contains_key("irc")),
+            ("web", self.web_enabled || self.channels.contains_key("web")),
+        ];
+        let mut enabled = Vec::new();
+        let mut configured_but_disabled = Vec::new();
+        for (name, is_configured) in configured {
+            if !is_configured {
+                continue;
+            }
+            if self.channel_enabled(name) {
+                enabled.push(name);
+            } else {
+                configured_but_disabled.push(name);
+            }
+        }
+        (enabled, configured_but_disabled)
+    }
+
     /// Load config from YAML file.
     pub fn load() -> Result<Self, MicroClawError> {
         let yaml_path = Self::resolve_config_path()?;
@@ -1442,10 +2128,13 @@ impl Config {
                             path_str
                         );
                     }
+                    for w in unknown_top_level_key_warnings(map) {
+                        warn!("{w} (in {path_str})");
+                    }
                 }
             }
             let mut config: Config = serde_yaml::from_str(&content)
-                .map_err(|e| MicroClawError::Config(format!("Failed to parse {path_str}: {e}")))?;
+                .map_err(|e| MicroClawError::Config(friendly_yaml_error(&path_str, &e)))?;
             config.post_deserialize()?;
             return Ok(config);
         }
@@ -1830,39 +2519,20 @@ Use operator password + API keys for Web auth."
         }
 
         // Validate required fields
-        let configured_telegram =
-            !self.telegram_bot_token.trim().is_empty() || self.channels.contains_key("telegram");
-        let configured_discord = self
-            .discord_bot_token
-            .as_deref()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-            || self.channels.contains_key("discord");
-        let configured_slack = self.channels.contains_key("slack");
-        let configured_feishu = self.channels.contains_key("feishu");
-        let configured_matrix = self.channels.contains_key("matrix");
-        let configured_irc = self.channels.contains_key("irc");
-        let configured_web = self.web_enabled || self.channels.contains_key("web");
-
-        let has_telegram = self.channel_enabled("telegram") && configured_telegram;
-        let has_discord = self.channel_enabled("discord") && configured_discord;
-        let has_slack = self.channel_enabled("slack") && configured_slack;
-        let has_feishu = self.channel_enabled("feishu") && configured_feishu;
-        let has_matrix = self.channel_enabled("matrix") && configured_matrix;
-        let has_irc = self.channel_enabled("irc") && configured_irc;
-        let has_web = self.channel_enabled("web") && configured_web;
-
-        if !(has_telegram
-            || has_discord
-            || has_slack
-            || has_feishu
-            || has_matrix
-            || has_irc
-            || has_web)
-        {
-            return Err(MicroClawError::Config(
-                "At least one channel must be enabled and configured (via channels.<name>.enabled or legacy channel settings)".into(),
-            ));
+        let (enabled_channels, configured_but_disabled) = self.channel_status();
+        if enabled_channels.is_empty() {
+            let hint = if configured_but_disabled.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " These channels are configured but not enabled: {}. \
+                     Set `channels.<name>.enabled: true` (or run `microclaw setup`).",
+                    configured_but_disabled.join(", ")
+                )
+            };
+            return Err(MicroClawError::Config(format!(
+                "At least one channel must be enabled and configured (via channels.<name>.enabled or legacy channel settings).{hint}"
+            )));
         }
         if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {
             return Err(MicroClawError::Config("api_key is required".into()));
@@ -2219,12 +2889,299 @@ fn merge_provider_profile(
     }
 }
 
+/// Turn a raw `serde_yaml` parse error into an actionable message. When the
+/// error is an unknown field or variant (the common YAML typo), suggest the
+/// closest valid name, and always point the user at `setup` / the example
+/// config. The original error (with its line/column) is preserved.
+fn friendly_yaml_error(path_str: &str, err: &serde_yaml::Error) -> String {
+    let raw = err.to_string();
+    let mut hint = String::new();
+    if let Some((kind, token)) = extract_unknown_token(&raw) {
+        match suggest_closest(token, &extract_backtick_options(&raw)) {
+            Some(best) => {
+                hint = format!("\n\n  Unknown {kind} `{token}` — did you mean `{best}`?");
+            }
+            None => hint = format!("\n\n  Unknown {kind} `{token}`."),
+        }
+    }
+    format!(
+        "Failed to parse {path_str}: {raw}{hint}\n\n  \
+         Edit the config and re-run, or run `microclaw setup`.\n  \
+         Reference: https://github.com/microclaw/microclaw/blob/main/microclaw.config.example.yaml"
+    )
+}
+
+/// Build the set of accepted top-level config keys by serializing a baseline
+/// `Config` (so it stays in sync with the struct, including the flattened
+/// `clawhub_*` keys), plus the few fields excluded from serialization and the
+/// deprecated aliases handled elsewhere. Returns `None` if the baseline can't
+/// be derived, so callers skip the check rather than emit spurious warnings.
+fn known_top_level_config_keys() -> Option<std::collections::BTreeSet<String>> {
+    let base: Config = serde_yaml::from_str("{}").ok()?;
+    let serde_yaml::Value::Mapping(serialized) = serde_yaml::to_value(&base).ok()? else {
+        return None;
+    };
+    let mut known: std::collections::BTreeSet<String> = serialized
+        .keys()
+        .filter_map(|k| k.as_str().map(str::to_string))
+        .collect();
+    // Accepted on input but excluded from serialization (skip_serializing[_if])
+    // or kept only for backward-compatible deprecation warnings.
+    for k in ["timezone", "override_timezone", "web_auth_token"] {
+        known.insert(k.to_string());
+    }
+    // Sanity guard: a healthy Config has many keys; if we somehow derived only
+    // a handful, treat the set as unreliable and skip the check.
+    if known.len() < 5 {
+        return None;
+    }
+    Some(known)
+}
+
+/// Soft-validate top-level config keys: serde silently ignores unknown fields,
+/// so a typo like `discrod:` is otherwise invisible. Returns one human-readable
+/// warning per unrecognized key (with a did-you-mean suggestion when close).
+/// Does not fail the load.
+fn unknown_top_level_key_warnings(map: &serde_yaml::Mapping) -> Vec<String> {
+    let Some(known) = known_top_level_config_keys() else {
+        return Vec::new();
+    };
+    let candidates: Vec<String> = known.iter().cloned().collect();
+    let mut warnings = Vec::new();
+    for key in map.keys() {
+        let Some(name) = key.as_str() else { continue };
+        if known.contains(name) {
+            continue;
+        }
+        match suggest_closest(name, &candidates) {
+            Some(best) => warnings.push(format!(
+                "Unknown config key `{name}` (ignored) — did you mean `{best}`?"
+            )),
+            None => warnings.push(format!("Unknown config key `{name}` (ignored).")),
+        }
+    }
+    warnings
+}
+
+/// Extract `(kind, token)` from a serde "unknown variant/field `X`" message.
+fn extract_unknown_token(raw: &str) -> Option<(&'static str, &str)> {
+    for (needle, kind) in [("unknown variant `", "variant"), ("unknown field `", "field")] {
+        if let Some(start) = raw.find(needle) {
+            let rest = &raw[start + needle.len()..];
+            if let Some(end) = rest.find('`') {
+                return Some((kind, &rest[..end]));
+            }
+        }
+    }
+    None
+}
+
+/// Collect the backtick-quoted options listed after "expected" in a serde error.
+fn extract_backtick_options(raw: &str) -> Vec<String> {
+    let Some(exp) = raw.find("expected") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut rest = &raw[exp..];
+    while let Some(open) = rest.find('`') {
+        rest = &rest[open + 1..];
+        if let Some(close) = rest.find('`') {
+            out.push(rest[..close].to_string());
+            rest = &rest[close + 1..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Pick the closest option to `token` by edit distance, if one is "close
+/// enough" (distance at most a third of the token length, min 2).
+fn suggest_closest(token: &str, options: &[String]) -> Option<String> {
+    let threshold = (token.chars().count() / 3).max(2);
+    options
+        .iter()
+        .map(|o| (levenshtein(token, o), o))
+        .filter(|(d, _)| *d <= threshold)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, o)| o.clone())
+}
+
+/// Standard Levenshtein edit distance.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::test_support::env_lock()
+    }
+
+    #[test]
+    fn aux_models_default_falls_back_to_main_model() {
+        let aux = AuxModels::default();
+        assert_eq!(aux.compaction_model("main-model"), "main-model");
+    }
+
+    #[test]
+    fn friendly_error_suggests_closest_field() {
+        // A real serde_yaml unknown-field error for a mistyped key.
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Mini {
+            #[allow(dead_code)]
+            discord: bool,
+        }
+        let err = serde_yaml::from_str::<Mini>("discrod: true\n").unwrap_err();
+        let msg = friendly_yaml_error("cfg.yaml", &err);
+        assert!(msg.contains("did you mean `discord`?"), "got: {msg}");
+        assert!(msg.contains("microclaw setup"));
+    }
+
+    #[test]
+    fn extract_and_suggest_helpers() {
+        let raw = "unknown variant `discrod`, expected one of `telegram`, `discord`, `slack`";
+        assert_eq!(extract_unknown_token(raw), Some(("variant", "discrod")));
+        let opts = extract_backtick_options(raw);
+        assert_eq!(opts, vec!["telegram", "discord", "slack"]);
+        assert_eq!(suggest_closest("discrod", &opts).as_deref(), Some("discord"));
+        // Nothing close → no suggestion.
+        assert_eq!(suggest_closest("zzzzzz", &opts), None);
+    }
+
+    #[test]
+    fn levenshtein_basics() {
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("discord", "discord"), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+    }
+
+    #[test]
+    fn channel_status_splits_enabled_and_disabled() {
+        let cfg: Config = serde_yaml::from_str(
+            "api_key: k\nweb_enabled: false\nchannels:\n  telegram:\n    enabled: true\n  discord:\n    enabled: false\n",
+        )
+        .unwrap();
+        let (enabled, disabled) = cfg.channel_status();
+        assert_eq!(enabled, vec!["telegram"]);
+        assert_eq!(disabled, vec!["discord"]);
+    }
+
+    #[test]
+    fn no_enabled_channel_error_names_disabled_channel() {
+        let mut cfg: Config = serde_yaml::from_str(
+            "api_key: k\nweb_enabled: false\nchannels:\n  telegram:\n    enabled: false\n",
+        )
+        .unwrap();
+        let err = cfg.post_deserialize().unwrap_err().to_string();
+        assert!(err.contains("configured but not enabled"), "got: {err}");
+        assert!(err.contains("telegram"), "got: {err}");
+    }
+
+    #[test]
+    fn aux_models_compaction_override_is_used() {
+        let aux = AuxModels {
+            compaction: Some("cheap-model".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(aux.compaction_model("main-model"), "cheap-model");
+    }
+
+    #[test]
+    fn aux_models_blank_override_falls_back() {
+        let aux = AuxModels {
+            compaction: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(aux.compaction_model("main-model"), "main-model");
+    }
+
+    #[test]
+    fn aux_models_parse_from_yaml() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\naux_models:\n  compaction: claude-haiku-4-5\n  reflector: claude-haiku-4-5\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.aux_models.compaction.as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            config.aux_models.reflector_model(),
+            Some("claude-haiku-4-5")
+        );
+    }
+
+    #[test]
+    fn aux_models_reflector_default_is_none() {
+        let aux = AuxModels::default();
+        assert_eq!(aux.reflector_model(), None);
+    }
+
+    #[test]
+    fn aux_models_reflector_blank_is_none() {
+        let aux = AuxModels {
+            reflector: Some("  ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(aux.reflector_model(), None);
+    }
+
+    #[test]
+    fn aux_models_absent_yaml_defaults_to_none() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.aux_models.compaction.is_none());
+    }
+
+    #[test]
+    fn aux_models_title_and_vision_default_none() {
+        let aux = AuxModels::default();
+        assert_eq!(aux.title_model(), None);
+        assert_eq!(aux.vision_model(), None);
+    }
+
+    #[test]
+    fn aux_models_title_and_vision_override_used() {
+        let aux = AuxModels {
+            title: Some("title-model".to_string()),
+            vision: Some("vision-model".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(aux.title_model(), Some("title-model"));
+        assert_eq!(aux.vision_model(), Some("vision-model"));
+    }
+
+    #[test]
+    fn aux_models_title_and_vision_blank_is_none() {
+        let aux = AuxModels {
+            title: Some("  ".to_string()),
+            vision: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(aux.title_model(), None);
+        assert_eq!(aux.vision_model(), None);
+    }
+
+    #[test]
+    fn aux_models_title_vision_parse_from_yaml() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\naux_models:\n  title: claude-haiku-4-5\n  vision: claude-haiku-4-5\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.aux_models.title_model(), Some("claude-haiku-4-5"));
+        assert_eq!(config.aux_models.vision_model(), Some("claude-haiku-4-5"));
     }
 
     #[test]
@@ -3442,5 +4399,51 @@ discord_allowed_channels: [111, 222]
             PathBuf::from(config.skills_dir.unwrap()),
             home.join("skills")
         );
+    }
+
+    fn mapping_of(yaml: &str) -> serde_yaml::Mapping {
+        serde_yaml::from_str::<serde_yaml::Value>(yaml)
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_flagged() {
+        let map = mapping_of("definitely_not_a_key: true\napi_key: k\n");
+        let warnings = unknown_top_level_key_warnings(&map);
+        assert!(
+            warnings.iter().any(|w| w.contains("definitely_not_a_key")),
+            "expected an unknown-key warning, got: {warnings:?}"
+        );
+        // A real key in the same document must not be flagged.
+        assert!(
+            !warnings.iter().any(|w| w.contains("`api_key`")),
+            "api_key should be recognized, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_gets_did_you_mean() {
+        // `api_ky` is one edit away from the real `api_key`.
+        let map = mapping_of("api_ky: k\n");
+        let warnings = unknown_top_level_key_warnings(&map);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("api_ky") && w.contains("did you mean `api_key`")),
+            "expected a did-you-mean suggestion, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn known_top_level_keys_produce_no_warnings() {
+        // A spread of real keys: plain fields, a nested struct, the flattened
+        // clawhub_* keys, and the skip-serialized timezone fields.
+        let yaml = "api_key: k\ntelegram_bot_token: t\nclawhub_registry: https://x\n\
+timezone: UTC\noverride_timezone: UTC\nsandbox:\n  enabled: false\n";
+        let warnings = unknown_top_level_key_warnings(&mapping_of(yaml));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     }
 }

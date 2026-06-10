@@ -353,7 +353,7 @@ impl EventHandler for Handler {
             return;
         }
 
-        let text = msg.content.clone();
+        let mut text = msg.content.clone();
         let external_channel_id = msg.channel_id.get();
         let channel_id = {
             let external_chat_id = external_channel_id.to_string();
@@ -372,6 +372,74 @@ impl EventHandler for Handler {
             .unwrap_or(external_channel_id as i64)
         };
         let sender_name = msg.author.name.clone();
+        let mut voice_inbound = false;
+
+        // Discord voice messages and audio attachments arrive as Attachment
+        // entries with `content_type` starting with "audio/". Download them
+        // and substitute the transcription so the agent sees the message.
+        if !msg.attachments.is_empty() {
+            let audio_attachments: Vec<&serenity::model::channel::Attachment> = msg
+                .attachments
+                .iter()
+                .filter(|a| {
+                    a.content_type
+                        .as_deref()
+                        .map(|c| c.starts_with("audio/"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !audio_attachments.is_empty()
+                && crate::voice::can_transcribe(&self.app_state.config)
+            {
+                let max_bytes: u32 = 25 * 1024 * 1024;
+                let client = reqwest::Client::new();
+                let mut transcripts: Vec<String> = Vec::new();
+                for att in audio_attachments {
+                    if att.size > max_bytes {
+                        warn!(
+                            "Discord: skipping audio attachment {}; size={} exceeds 25MB",
+                            att.filename, att.size
+                        );
+                        continue;
+                    }
+                    let bytes = match client.get(&att.url).send().await {
+                        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                            Ok(b) => b.to_vec(),
+                            Err(e) => {
+                                warn!("Discord: failed to read audio bytes: {e}");
+                                continue;
+                            }
+                        },
+                        Ok(resp) => {
+                            warn!("Discord: audio download HTTP {}", resp.status());
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!("Discord: failed to download audio: {e}");
+                            continue;
+                        }
+                    };
+                    match crate::voice::transcribe_audio(&self.app_state.config, &bytes).await {
+                        Ok(t) => transcripts
+                            .push(crate::voice::format_voice_inbound(&sender_name, &t)),
+                        Err(e) => {
+                            warn!("Discord: voice transcription failed: {e}");
+                            transcripts
+                                .push(crate::voice::format_voice_inbound_error(&sender_name, &e));
+                        }
+                    }
+                }
+                if !transcripts.is_empty() {
+                    let joined = transcripts.join("\n");
+                    text = if text.trim().is_empty() {
+                        joined
+                    } else {
+                        format!("{}\n\n{}", text.trim(), joined)
+                    };
+                    voice_inbound = true;
+                }
+            }
+        }
 
         // Check allowed channels (empty = all)
         if !self.runtime.allowed_channels.is_empty()
@@ -591,7 +659,26 @@ impl EventHandler for Handler {
         // Start typing indicator
         let typing = msg.channel_id.start_typing(&ctx.http);
 
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        // Live event tap: echo MidTurnInjection acks and detect send_message
+        // tool usage concurrently with the running agent loop.
+        let injection_ack: Option<crate::channels::event_tap::InjectionAck> =
+            if self.app_state.config.mid_turn_injection_echo {
+                let http_for_tap = ctx.http.clone();
+                let channel_for_tap = msg.channel_id;
+                Some(Box::new(move |count| {
+                    let http = http_for_tap.clone();
+                    Box::pin(async move {
+                        let text = crate::channels::event_tap::mid_turn_injection_ack_text(count);
+                        if let Err(e) = channel_for_tap.say(&http, text).await {
+                            warn!("Discord: failed to send mid-turn injection ack: {e}");
+                        }
+                    })
+                }))
+            } else {
+                None
+            };
+        let mut tap = crate::channels::event_tap::EventTap::spawn(event_rx, injection_ack);
         // Process with shared agent engine (reuses the same loop as Telegram)
         match process_with_agent_with_events_guarded(
             &self.app_state,
@@ -611,14 +698,13 @@ impl EventHandler for Handler {
             Ok(response) => {
                 drop(typing);
                 drop(event_tx);
-                let mut used_send_message_tool = false;
-                while let Some(event) = event_rx.recv().await {
-                    if let AgentEvent::ToolStart { name, .. } = event {
-                        if name == "send_message" {
-                            used_send_message_tool = true;
-                        }
-                    }
-                }
+                let response_for_voice = response.clone();
+                while tap.replay_rx.recv().await.is_some() {}
+                let used_send_message_tool = tap
+                    .join
+                    .await
+                    .map(|r| r.used_send_message_tool)
+                    .unwrap_or(false);
 
                 if used_send_message_tool {
                     if !response.is_empty() {
@@ -659,6 +745,44 @@ impl EventHandler for Handler {
                         db.store_message(&bot_msg)
                     })
                     .await;
+                }
+
+                // Voice round-trip: synthesize reply audio and send as a
+                // file attachment so the user hears the response on the
+                // same surface they spoke into.
+                if voice_inbound
+                    && crate::voice::round_trip_enabled(&self.app_state.config)
+                    && !response_for_voice.trim().is_empty()
+                {
+                    match crate::voice::synth_speech_to_temp(
+                        &self.app_state.config,
+                        &response_for_voice,
+                    )
+                    .await
+                    {
+                        Ok(audio_path) => {
+                            let attachments = [serenity::builder::CreateAttachment::path(
+                                &audio_path,
+                            )
+                            .await];
+                            match attachments {
+                                [Ok(att)] => {
+                                    let builder = serenity::builder::CreateMessage::new()
+                                        .add_file(att);
+                                    if let Err(e) =
+                                        msg.channel_id.send_message(&ctx.http, builder).await
+                                    {
+                                        warn!("Discord voice round-trip: send failed: {e}");
+                                    }
+                                }
+                                [Err(e)] => {
+                                    warn!("Discord voice round-trip: attach failed: {e}");
+                                }
+                            }
+                            let _ = tokio::fs::remove_file(&audio_path).await;
+                        }
+                        Err(e) => warn!("Discord voice round-trip: synth failed: {e}"),
+                    }
                 }
             }
             Err(e) => {
@@ -754,7 +878,10 @@ pub async fn start_discord_bot(
             }
         }
         Err(e) => {
-            error!("Discord bot error: {e}");
+            error!(
+                "Discord bot failed to start: {e}. If this is an authentication error, \
+                 check `discord.bot_token` (from the Discord Developer Portal) — run `microclaw setup`."
+            );
         }
     }
 }

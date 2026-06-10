@@ -103,7 +103,12 @@ impl DoctorReport {
 #[command(
     name = "microclaw doctor",
     about = "Preflight diagnostics",
-    long_about = "Checks PATH, shell/runtime dependencies, browser automation prerequisites, MCP command dependencies, and sandbox readiness."
+    long_about = "Checks PATH, shell/runtime dependencies, browser automation prerequisites, MCP command dependencies, and sandbox readiness.",
+    after_help = "\x1b[1mExamples:\x1b[22m\n  \
+        microclaw doctor             Run the offline preflight checks\n  \
+        microclaw doctor --online    …and verify the API key/model with a live request\n  \
+        microclaw doctor sandbox     Check container runtime + image readiness\n  \
+        microclaw doctor --json      Machine-readable report"
 )]
 struct DoctorCli {
     #[command(subcommand)]
@@ -112,6 +117,9 @@ struct DoctorCli {
     json: bool,
     #[arg(long, default_value_t = false)]
     apply_config_migrations: bool,
+    /// Send a live test request to the LLM provider to verify the API key/model.
+    #[arg(long, default_value_t = false)]
+    online: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -163,11 +171,16 @@ pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    let report = if sandbox_only {
+    let mut report = if sandbox_only {
         build_sandbox_report()
     } else {
         build_report()
     };
+    if !sandbox_only {
+        // Network probe lives outside `build_report` so the offline report stays
+        // pure (and hermetic for tests).
+        check_llm_credentials(&mut report, cli.online);
+    }
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -407,8 +420,12 @@ fn build_report() -> DoctorReport {
     );
 
     check_config(&mut report);
+    check_channels(&mut report);
+    check_data_dirs(&mut report);
     check_acp_subagent_config(&mut report);
     check_web_fetch_validation(&mut report);
+    check_context_layers(&mut report);
+    check_bash_dangerous_patterns(&mut report);
     check_path(&mut report);
     check_shell(&mut report);
     check_browser_dependency(&mut report);
@@ -441,13 +458,22 @@ fn build_sandbox_report() -> DoctorReport {
 
 fn check_config(report: &mut DoctorReport) {
     match Config::resolve_config_path() {
-        Ok(Some(path)) => report.push(
-            "config.file",
-            "Config file",
-            CheckStatus::Pass,
-            format!("found {}", path.display()),
-            None,
-        ),
+        Ok(Some(path)) => match Config::load() {
+            Ok(_) => report.push(
+                "config.file",
+                "Config file",
+                CheckStatus::Pass,
+                format!("found and valid: {}", path.display()),
+                None,
+            ),
+            Err(err) => report.push(
+                "config.file",
+                "Config file",
+                CheckStatus::Fail,
+                err.to_string(),
+                Some("Fix the config per the message above, or run `microclaw setup`.".to_string()),
+            ),
+        },
         Ok(None) => report.push(
             "config.file",
             "Config file",
@@ -463,6 +489,190 @@ fn check_config(report: &mut DoctorReport) {
             Some("Fix MICROCLAW_CONFIG or create a valid config file.".to_string()),
         ),
     }
+}
+
+fn check_channels(report: &mut DoctorReport) {
+    // A failed load (e.g. no channel enabled at all) is already reported by
+    // `check_config`; here we add detail when the config does load.
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+    let (enabled, configured_but_disabled) = config.channel_status();
+    if enabled.is_empty() {
+        report.push(
+            "channels.enabled",
+            "Channels",
+            CheckStatus::Fail,
+            "no channels are enabled".to_string(),
+            Some("Enable a channel with `channels.<name>.enabled: true`, or run `microclaw setup`.".to_string()),
+        );
+    } else {
+        report.push(
+            "channels.enabled",
+            "Channels",
+            CheckStatus::Pass,
+            format!("enabled: {}", enabled.join(", ")),
+            None,
+        );
+    }
+    if !configured_but_disabled.is_empty() {
+        report.push(
+            "channels.configured_disabled",
+            "Channels configured but disabled",
+            CheckStatus::Warn,
+            format!("{} configured but not enabled", configured_but_disabled.join(", ")),
+            Some(format!(
+                "Set `channels.{}.enabled: true` to activate (or remove the unused config).",
+                configured_but_disabled[0]
+            )),
+        );
+    }
+}
+
+/// Verify the data and working directories can be created and written to — the
+/// most common "it just won't start" cause (read-only path, wrong permissions,
+/// a typo'd `data_dir`). The DB, runtime state, and skills all live under these.
+fn check_data_dirs(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+    for (id, label, raw) in [
+        ("storage.data_dir", "Data dir writable", config.runtime_data_dir()),
+        ("storage.working_dir", "Working dir writable", config.working_dir.clone()),
+    ] {
+        let path = PathBuf::from(shellexpand::tilde(&raw).as_ref());
+        match check_dir_writable(&path) {
+            Ok(()) => report.push(
+                id,
+                label,
+                CheckStatus::Pass,
+                format!("writable: {}", path.display()),
+                None,
+            ),
+            Err(err) => report.push(
+                id,
+                label,
+                CheckStatus::Fail,
+                err,
+                Some("Check the path's permissions and free space, or point `data_dir`/`working_dir` at a writable location.".to_string()),
+            ),
+        }
+    }
+}
+
+/// Create `dir` if needed and confirm a file can be written there, cleaning up
+/// the probe file. Returns a human-readable reason on failure.
+fn check_dir_writable(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let probe = dir.join(format!(".microclaw-doctor-{}.tmp", std::process::id()));
+    std::fs::write(&probe, b"ok").map_err(|e| format!("cannot write to {}: {e}", dir.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Verify the configured LLM credentials with a live "hi" request (only when
+/// `online` is set, since `doctor` is otherwise hermetic). Reuses the same probe
+/// as the setup wizard. Runs on a dedicated thread because the probe uses
+/// blocking HTTP and `doctor` runs inside an async runtime.
+fn check_llm_credentials(report: &mut DoctorReport, online: bool) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return, // load failure already reported by check_config
+    };
+    let provider = config.llm_provider.clone();
+
+    if crate::codex_auth::is_openai_codex_provider(&provider) {
+        report.push(
+            "llm.credentials",
+            "LLM credentials",
+            CheckStatus::Miss,
+            "openai-codex uses external auth (~/.codex); not probed".to_string(),
+            None,
+        );
+        return;
+    }
+
+    if !online {
+        report.push(
+            "llm.credentials",
+            "LLM credentials",
+            CheckStatus::Miss,
+            "not verified (offline)".to_string(),
+            Some("Run `microclaw doctor --online` to send a test request to the provider.".to_string()),
+        );
+        return;
+    }
+
+    let api_key = config.api_key.clone();
+    let base_url = config.llm_base_url.clone().unwrap_or_default();
+    let model = config.model.clone();
+    let user_agent = config.llm_user_agent.clone();
+
+    // Blocking probe on its own thread (doctor runs under Tokio).
+    let probe = std::thread::spawn(move || {
+        crate::setup::validate_llm_credentials(&provider, &api_key, &base_url, &user_agent, &model, None)
+    })
+    .join();
+
+    match probe {
+        Ok(Ok(msg)) => report.push(
+            "llm.credentials",
+            "LLM credentials",
+            CheckStatus::Pass,
+            msg,
+            None,
+        ),
+        Ok(Err(err)) => {
+            let detail = err.to_string();
+            if looks_like_auth_error(&detail) {
+                report.push(
+                    "llm.credentials",
+                    "LLM credentials",
+                    CheckStatus::Fail,
+                    detail,
+                    Some("Check your `api_key` and `model` — run `microclaw setup`.".to_string()),
+                );
+            } else {
+                report.push(
+                    "llm.credentials",
+                    "LLM credentials",
+                    CheckStatus::Warn,
+                    format!("could not verify: {detail}"),
+                    Some("Provider unreachable or a transient error; check `llm_base_url`/network and retry.".to_string()),
+                );
+            }
+        }
+        Err(_) => report.push(
+            "llm.credentials",
+            "LLM credentials",
+            CheckStatus::Warn,
+            "credential probe thread panicked".to_string(),
+            None,
+        ),
+    }
+}
+
+/// Heuristic: does this validation error look like rejected credentials (vs a
+/// network/transient failure)?
+fn looks_like_auth_error(detail: &str) -> bool {
+    let l = detail.to_lowercase();
+    [
+        "401",
+        "403",
+        "unauthorized",
+        "invalid x-api-key",
+        "invalid api key",
+        "incorrect api key",
+        "authentication",
+        "api key",
+        "api-key",
+        "permission denied",
+    ]
+    .iter()
+    .any(|needle| l.contains(needle))
 }
 
 fn check_web_fetch_validation(report: &mut DoctorReport) {
@@ -752,6 +962,109 @@ fn check_acp_subagent_config(report: &mut DoctorReport) {
                     .to_string(),
             ),
         ),
+    }
+}
+
+fn check_context_layers(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+
+    // Project context cap. Honor 0 as an explicit "disabled" signal — that's
+    // a deliberate operator choice, not a misconfiguration.
+    let ctx_cap = config.context_max_chars;
+    let ctx_status = if ctx_cap == 0 || ctx_cap > 32_000 {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Pass
+    };
+    let ctx_fix = if ctx_cap == 0 {
+        Some("context_max_chars=0 disables project context entirely; set a positive cap (default 8000) to re-enable.".to_string())
+    } else if ctx_cap > 32_000 {
+        Some("context_max_chars > 32000 risks blowing the prefix-cache budget; consider 8000–16000.".to_string())
+    } else {
+        None
+    };
+    report.push(
+        "context.max_chars",
+        "Project Context cap",
+        ctx_status,
+        format!("context_max_chars={ctx_cap}"),
+        ctx_fix,
+    );
+
+    // USER.md cap. 0 disables the layer; very large caps defeat curation.
+    let um_cap = config.user_model_max_chars;
+    let um_status = if um_cap == 0 || um_cap > 8_000 {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Pass
+    };
+    let um_fix = if um_cap == 0 {
+        Some("user_model_max_chars=0 disables USER.md curation; set a positive cap (default 1500).".to_string())
+    } else if um_cap > 8_000 {
+        Some("user_model_max_chars > 8000 defeats the point of a curated narrative; Hermes ships 1375.".to_string())
+    } else {
+        None
+    };
+    report.push(
+        "user_model.max_chars",
+        "USER.md cap",
+        um_status,
+        format!("user_model_max_chars={um_cap}"),
+        um_fix,
+    );
+}
+
+fn check_bash_dangerous_patterns(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+
+    let patterns = &config.bash_dangerous_patterns;
+    if patterns.is_empty() {
+        report.push(
+            "bash.dangerous_patterns",
+            "Bash command-content gate",
+            CheckStatus::Warn,
+            "bash_dangerous_patterns is empty".to_string(),
+            Some("Empty list disables command-content approval — restore the default set or add at least sudo / rm -rf / pipe-to-shell patterns.".to_string()),
+        );
+        return;
+    }
+
+    let mut bad: Vec<String> = Vec::new();
+    for raw in patterns {
+        let with_flag = if raw.starts_with("(?i)") {
+            raw.clone()
+        } else {
+            format!("(?i){raw}")
+        };
+        if let Err(e) = regex::Regex::new(&with_flag) {
+            bad.push(format!("{raw:?}: {e}"));
+        }
+    }
+    if bad.is_empty() {
+        report.push(
+            "bash.dangerous_patterns",
+            "Bash command-content gate",
+            CheckStatus::Pass,
+            format!("{} pattern(s), all valid", patterns.len()),
+            None,
+        );
+    } else {
+        report.push(
+            "bash.dangerous_patterns",
+            "Bash command-content gate",
+            CheckStatus::Fail,
+            format!("{} invalid regex(es): {}", bad.len(), bad.join("; ")),
+            Some(
+                "Fix or remove invalid bash_dangerous_patterns entries — invalid ones are silently skipped at runtime, leaving the gate weaker than intended."
+                    .to_string(),
+            ),
+        );
     }
 }
 
@@ -1506,6 +1819,36 @@ mod tests {
     }
 
     #[test]
+    fn dir_writable_ok_and_failure() {
+        let base = std::env::temp_dir().join(format!(
+            "mc_doctor_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Fresh nested path is created and written to.
+        assert!(check_dir_writable(&base.join("sub")).is_ok());
+        // A path *under a regular file* can't be made into a directory.
+        let file = base.join("afile");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(check_dir_writable(&file.join("nope")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn auth_error_classification() {
+        // Provider rejections → auth (Fail).
+        assert!(looks_like_auth_error("LLM validation failed: invalid x-api-key"));
+        assert!(looks_like_auth_error("HTTP 401 Unauthorized"));
+        assert!(looks_like_auth_error("Incorrect API key provided"));
+        // Network/transient → not auth (Warn).
+        assert!(!looks_like_auth_error("error sending request: dns error"));
+        assert!(!looks_like_auth_error("operation timed out"));
+    }
+
+    #[test]
     fn test_classify_execution_policy_restricted() {
         let (status, detail, fix) = classify_execution_policy("Restricted");
         assert_eq!(status, CheckStatus::Fail);
@@ -1568,6 +1911,57 @@ mod tests {
             .iter()
             .any(|c| c.id == "web_fetch.content_validation"));
         assert!(report.checks.iter().any(|c| c.id == "web_fetch.url_policy"));
+    }
+
+    #[test]
+    fn test_build_report_flags_invalid_bash_dangerous_pattern() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_bash_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.bash_dangerous_patterns = vec!["[unclosed".to_string()];
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        let bash_check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "bash.dangerous_patterns")
+            .expect("bash.dangerous_patterns check should exist");
+        assert!(matches!(bash_check.status, CheckStatus::Fail));
+        assert!(bash_check.detail.contains("invalid"));
+    }
+
+    #[test]
+    fn test_build_report_warns_when_user_model_disabled() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_user_model_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.user_model_max_chars = 0;
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "user_model.max_chars")
+            .expect("user_model.max_chars check should exist");
+        assert!(matches!(check.status, CheckStatus::Warn));
     }
 
     #[test]

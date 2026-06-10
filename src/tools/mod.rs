@@ -2,30 +2,64 @@ pub mod a2a;
 pub mod activate_skill;
 pub mod bash;
 pub mod browser;
+pub mod clarify;
+pub mod consult_specialist;
+pub mod describe_image;
 pub mod edit_file;
 pub mod export_chat;
+pub mod fetch_artifact;
+pub mod fuzzy_match;
+pub mod generate_image;
 pub mod glob;
 pub mod grep;
+pub mod insights;
 pub mod knowledge_graph;
 pub mod mcp;
 pub mod memory;
 pub mod pptx_edit;
+pub mod osv_check;
 pub mod read_file;
+pub mod report_progress;
 pub mod schedule;
 pub mod send_message;
+pub mod session_search;
 pub mod skill_manage;
+pub mod specialists;
 pub mod structured_memory;
 pub mod subagents;
 pub mod sync_skills;
+pub mod text_to_speech;
 pub mod time_math;
 pub mod todo;
 pub mod voice;
+pub mod transcribe_audio;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
 
 use std::sync::{Arc, OnceLock};
 use std::{path::PathBuf, time::Instant};
+
+/// Tools that are read-only / side-effect-free for the same arguments. Used
+/// by the per-turn guardrail controller (`tool_guardrails.rs`) to detect
+/// "no progress" loops where the model keeps re-running the same query and
+/// getting the same result. NOT a security boundary — that's `tool_risk` /
+/// `tool_execution_policy` in the runtime crate.
+pub const IDEMPOTENT_TOOLS: &[&str] = &[
+    "describe_image",
+    "export_chat",
+    "fetch_artifact",
+    "glob",
+    "grep",
+    "insights",
+    "osv_check",
+    "read_file",
+    "session_search",
+    "time_math",
+    "transcribe_audio",
+    "web_fetch",
+    "web_search",
+];
 
 use crate::config::Config;
 use crate::memory_backend::MemoryBackend;
@@ -66,6 +100,7 @@ impl ToolRegistry {
                 | "subagents_focused"
                 | "subagents_send"
                 | "subagents_orchestrate"
+                | "session_search"
         )
     }
 
@@ -123,7 +158,8 @@ impl ToolRegistry {
                     config.working_dir_isolation,
                 )
                 .with_default_timeout_secs(config.tool_timeout_secs("bash", 120))
-                .with_sandbox_router(sandbox_router.clone()),
+                .with_sandbox_router(sandbox_router.clone())
+                .with_dangerous_patterns(&config.bash_dangerous_patterns),
             ),
             Box::new(
                 browser::BrowserTool::new(&config.data_dir)
@@ -245,10 +281,13 @@ impl ToolRegistry {
                 db.clone(),
                 channel_registry.clone(),
             )),
-            Box::new(activate_skill::ActivateSkillTool::new_with_runtime(
-                &skills_data_dir,
-                &config.data_dir,
-            )),
+            Box::new(
+                activate_skill::ActivateSkillTool::new_with_runtime(
+                    &skills_data_dir,
+                    &config.data_dir,
+                )
+                .with_db(db.clone()),
+            ),
             Box::new(skill_manage::SkillManageTool::new(
                 &skills_data_dir,
                 config.control_chat_ids.clone(),
@@ -273,6 +312,35 @@ impl ToolRegistry {
             Box::new(voice::VoiceSpeakTool::new(config)),
             Box::new(voice::VoiceHangupTool::new(config)),
             Box::new(voice::VoiceStatusTool::new(config)),
+            Box::new(session_search::SessionSearchTool::new(db.clone())),
+            Box::new(
+                osv_check::OsvCheckTool::new(config.tool_timeout_secs("osv_check", 10))
+                    .with_cache(db.clone()),
+            ),
+            Box::new(clarify::ClarifyTool::new(
+                channel_registry.clone(),
+                db.clone(),
+                if config.bot_username.trim().is_empty() {
+                    "bot".to_string()
+                } else {
+                    config.bot_username.clone()
+                },
+                config.bot_username_overrides(),
+            )),
+            Box::new(generate_image::GenerateImageTool::new(
+                config,
+                channel_registry.clone(),
+                db.clone(),
+            )),
+            Box::new(describe_image::DescribeImageTool::new(config)),
+            Box::new(text_to_speech::TextToSpeechTool::new(
+                config,
+                channel_registry.clone(),
+                db.clone(),
+            )),
+            Box::new(transcribe_audio::TranscribeAudioTool::new(config)),
+            Box::new(insights::InsightsTool::new(db.clone())),
+            Box::new(fetch_artifact::FetchArtifactTool::new(db.clone())),
         ];
 
         // Add ClawHub tools if enabled
@@ -324,7 +392,8 @@ impl ToolRegistry {
                     config.working_dir_isolation,
                 )
                 .with_default_timeout_secs(config.tool_timeout_secs("bash", 120))
-                .with_sandbox_router(sandbox_router.clone()),
+                .with_sandbox_router(sandbox_router.clone())
+                .with_dangerous_patterns(&config.bash_dangerous_patterns),
             ),
             Box::new(
                 browser::BrowserTool::new(&config.data_dir)
@@ -363,15 +432,40 @@ impl ToolRegistry {
             Box::new(time_math::CompareTimeTool::new(config.timezone.clone())),
             Box::new(time_math::CalculateTool::new()),
             Box::new(pptx_edit::PptxEditTool::new()),
-            Box::new(activate_skill::ActivateSkillTool::new_with_runtime(
-                &skills_data_dir,
-                &config.data_dir,
-            )),
+            Box::new(
+                activate_skill::ActivateSkillTool::new_with_runtime(
+                    &skills_data_dir,
+                    &config.data_dir,
+                )
+                .with_db(db.clone()),
+            ),
             Box::new(structured_memory::StructuredMemorySearchTool::new(
                 db.clone(),
                 memory_backend,
             )),
+            Box::new(session_search::SessionSearchTool::new(db.clone())),
+            Box::new(
+                osv_check::OsvCheckTool::new(config.tool_timeout_secs("osv_check", 10))
+                    .with_cache(db.clone()),
+            ),
+            Box::new(fetch_artifact::FetchArtifactTool::new(db.clone())),
+            Box::new(describe_image::DescribeImageTool::new(config)),
+            Box::new(consult_specialist::ConsultSpecialistTool::new(config)),
         ];
+        // Visual creation + progress reporting: available to specialists whenever a
+        // channel registry is present, independent of session-spawn permissions.
+        if let Some(cr) = &channel_registry {
+            tools.push(Box::new(generate_image::GenerateImageTool::new(
+                config,
+                cr.clone(),
+                db.clone(),
+            )));
+            tools.push(Box::new(report_progress::ReportProgressTool::new(
+                config,
+                cr.clone(),
+                db.clone(),
+            )));
+        }
         if allow_session_tools {
             if let Some(channel_registry) = channel_registry {
                 tools.push(Box::new(subagents::SessionsSpawnTool::new(
