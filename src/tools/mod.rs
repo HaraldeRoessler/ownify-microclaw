@@ -328,18 +328,16 @@ impl ToolRegistry {
                 },
                 config.bot_username_overrides(),
             )),
-            // Ownify-fork: the OLD image_gen tool that handles OpenRouter
-            // via /v1/chat/completions with modalities:["image"]. The
-            // upstream v0.2.2 generate_image tool only supports the
-            // OpenAI /v1/images/generations shape, which OpenRouter does
-            // not implement. We register BOTH so users on OpenAI direct
-            // (or other OpenAI-compatible providers) can use either.
+            // Ownify-fork: the image_gen tool that handles OpenRouter via
+            // /v1/chat/completions with modalities:["image"]. The upstream
+            // v0.2.2 generate_image tool was REMOVED — it only supports the
+            // OpenAI /v1/images/generations shape, which OpenRouter (the
+            // provider we use) does not implement, and it requires a
+            // separate media.image_gen.enabled=true opt-in that the
+            // dashboard never sets. The old `image_gen` tool is a strict
+            // superset: it auto-detects OpenRouter vs OpenAI by provider
+            // name and dispatches to the right endpoint.
             Box::new(image_gen::ImageGenTool::new(config)),
-            Box::new(generate_image::GenerateImageTool::new(
-                config,
-                channel_registry.clone(),
-                db.clone(),
-            )),
             Box::new(describe_image::DescribeImageTool::new(config)),
             Box::new(text_to_speech::TextToSpeechTool::new(
                 config,
@@ -458,20 +456,19 @@ impl ToolRegistry {
             ),
             Box::new(fetch_artifact::FetchArtifactTool::new(db.clone())),
             Box::new(describe_image::DescribeImageTool::new(config)),
-            // Ownify-fork: register old image_gen (OpenRouter-compatible)
-            // alongside the new generate_image. See comment on the
-            // primary registration in build_full_agent_registry above.
+            // Ownify-fork: register the image_gen (OpenRouter-compatible)
+            // tool here too. The upstream generate_image tool was removed
+            // (see the comment on the primary registration above).
             Box::new(image_gen::ImageGenTool::new(config)),
             Box::new(consult_specialist::ConsultSpecialistTool::new(config)),
         ];
         // Visual creation + progress reporting: available to specialists whenever a
         // channel registry is present, independent of session-spawn permissions.
         if let Some(cr) = &channel_registry {
-            tools.push(Box::new(generate_image::GenerateImageTool::new(
-                config,
-                cr.clone(),
-                db.clone(),
-            )));
+            // image_gen replaces generate_image (it auto-detects OpenRouter
+            // vs OpenAI by provider name and dispatches to the right
+            // endpoint). The OpenRouter-aware image_gen tool is already
+            // registered above — no need to re-register here.
             tools.push(Box::new(report_progress::ReportProgressTool::new(
                 config,
                 cr.clone(),

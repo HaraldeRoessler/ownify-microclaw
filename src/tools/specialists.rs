@@ -42,9 +42,12 @@ explicitly, and give the final answer precisely.",
         name: "illustrator",
         summary: "visual creation: crafts strong prompts, generates images",
         persona: "You are an illustrator sub-agent. Translate the request into a vivid, concrete \
-image and produce it with the `generate_image` tool. Think about subject, composition, style, \
+image and produce it with the `image_gen` tool. Think about subject, composition, style, \
 lighting, palette, and mood, and bake those into a strong, specific prompt. Iterate if the first \
-result misses the brief, and briefly describe what you made.",
+result misses the brief, and briefly describe what you made. The `image_gen` tool works with \
+OpenRouter (via /v1/chat/completions + modalities:[\"image\"]), OpenAI direct, Together, \
+Replicate, and Stability — set IMAGE_API_URL accordingly. Auto-saves data URIs to disk and \
+returns the local path; never echo raw base64 back to the LLM context.",
     },
     SpecialistProfile {
         name: "researcher",

@@ -2237,6 +2237,35 @@ impl Config {
                 self.image_default_size = v;
             }
         }
+        // Ownify-fork: when IMAGE_API_KEY is set (from ownify-skill-credentials
+        // Secret), auto-enable the upstream v0.2.2 media.image_gen.enabled
+        // flag too. This is defense in depth: the dashboard's image-provider
+        // flow only writes the IMAGE_* env vars, never sets media.image_gen.*
+        // in the configmap. If any code path still checks the old flag (or
+        // a custom configmap explicitly opts out), the env-var-based
+        // detection still works. The image_gen tool itself reads from
+        // self.image_api_url / self.image_api_key (the top-level fields
+        // we just populated above), so it works regardless of this flag.
+        if !self.image_api_key.is_empty() {
+            self.media.image_gen.enabled = true;
+            // Also populate media.api_key and media.base_url so any
+            // MediaConfig::resolve_api_key / resolve_base_url caller
+            // gets the right values without explicit opt-in.
+            if self.media.api_key.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                self.media.api_key = Some(self.image_api_key.clone());
+            }
+            if self.media.base_url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                self.media.base_url = Some(self.image_api_url.clone());
+            }
+            // Propagate the model and size so the upstream tool, if
+            // anyone re-enables it, would pick them up.
+            if !self.image_model.is_empty() {
+                self.media.image_gen.model = self.image_model.clone();
+            }
+            if !self.image_default_size.is_empty() {
+                self.media.image_gen.default_size = self.image_default_size.clone();
+            }
+        }
 
         self.llm_provider = self.llm_provider.trim().to_lowercase();
 
