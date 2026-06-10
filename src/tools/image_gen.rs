@@ -25,7 +25,7 @@
 //! - everything else (openai, together, replicate, stability, custom, empty):
 //!   uses the OpenAI-style `/v1/images/generations` endpoint, unchanged.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -35,7 +35,7 @@ use tracing::{info, warn};
 
 use microclaw_core::llm_types::ToolDefinition;
 use microclaw_tools::runtime::{
-    resolve_tool_path, resolve_tool_working_dir, Tool, ToolResult,
+    resolve_tool_working_dir, Tool, ToolResult,
 };
 
 use crate::config::{Config, WorkingDirIsolation};
@@ -353,6 +353,16 @@ impl Tool for ImageGenTool {
         // `send_message attachment_path=...` without having to know the
         // chat-specific dir.
         //
+        // Note: the chat-isolated working dir is something like
+        // `/home/microclaw/.microclaw/workspace/chat/matrix/1/tmp`. The
+        // bot's CWD when calling bash/send_message is exactly this dir.
+        // The LLM naturally thinks in terms of "current dir" and writes
+        // relative paths like `tmp/red_apple.png` meaning "the tmp/ I'm
+        // already in" — but resolve_tool_path() would join them and get
+        // `.../tmp/tmp/red_apple.png` (one tmp/ too many). We work around
+        // this by stripping a single leading `tmp/` segment if the chat
+        // dir already ends in `tmp`.
+        //
         // Priority:
         //  1. If the caller provided an explicit save_path (absolute or
         //     relative-to-chat-dir), use that.
@@ -367,8 +377,34 @@ impl Tool for ImageGenTool {
                     &input,
                 );
                 // Absolute path → use as-is. Relative → resolve against
-                // chat-isolated working dir.
-                let resolved = resolve_tool_path(&chat_dir, save_path);
+                // chat-isolated working dir, with a workaround for the
+                // common "tmp/foo.png" pattern that LLM uses (strip a
+                // leading tmp/ segment if the chat dir already ends in tmp).
+                let resolved = if Path::new(save_path).is_absolute() {
+                    PathBuf::from(save_path)
+                } else {
+                    let path = Path::new(save_path);
+                    let strip_leading_tmp = chat_dir
+                        .file_name()
+                        .map(|n| n == "tmp")
+                        .unwrap_or(false)
+                        && path
+                            .components()
+                            .next()
+                            .and_then(|c| c.as_os_str().to_str())
+                            .map(|s| s == "tmp")
+                            .unwrap_or(false);
+                    if strip_leading_tmp {
+                        // Skip the leading "tmp/" component.
+                        let stripped = path
+                            .components()
+                            .skip(1)
+                            .collect::<std::path::PathBuf>();
+                        chat_dir.join(stripped)
+                    } else {
+                        chat_dir.join(path)
+                    }
+                };
                 let resolved_str = resolved.to_string_lossy().to_string();
                 Some(self.persist_first_image(first_url, &resolved_str, &model).await)
             } else {
