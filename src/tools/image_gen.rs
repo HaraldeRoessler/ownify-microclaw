@@ -25,6 +25,7 @@
 //! - everything else (openai, together, replicate, stability, custom, empty):
 //!   uses the OpenAI-style `/v1/images/generations` endpoint, unchanged.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,9 +34,11 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use microclaw_core::llm_types::ToolDefinition;
-use microclaw_tools::runtime::{Tool, ToolResult};
+use microclaw_tools::runtime::{
+    resolve_tool_path, resolve_tool_working_dir, Tool, ToolResult,
+};
 
-use crate::config::Config;
+use crate::config::{Config, WorkingDirIsolation};
 
 // ── image_gen ─────────────────────────────────────────────────
 
@@ -72,11 +75,13 @@ pub struct ImageGenTool {
     image_model: String,
     image_default_size: String,
     image_provider: String,
-    /// Base directory for auto-saving generated images. The tool will always
-    /// write the image bytes to disk and return only the path in the result
-    /// (never the base64 data URI) so the LLM context doesn't bloat with
-    /// multi-hundred-KB tool responses.
-    image_output_dir: String,
+    /// Base working directory. When `working_dir_isolation: "chat"` is set,
+    /// the actual save dir is `<working_dir>/<channel>/<chat_id>/image_gen/`
+    /// — that way the LLM doesn't have to think about chat-specific paths
+    /// and the file ends up somewhere the chat-isolated send_message tool
+    /// can find it without absolute paths.
+    working_dir: PathBuf,
+    working_dir_isolation: WorkingDirIsolation,
     http: reqwest::Client,
 }
 
@@ -86,20 +91,14 @@ impl ImageGenTool {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("reqwest client builder should not fail");
-        // Default: <working_dir>/image_gen/. Falls back to /tmp if working_dir
-        // is empty (shouldn't happen but is a safe default).
-        let image_output_dir = if config.working_dir.is_empty() {
-            "/tmp/image_gen".to_string()
-        } else {
-            format!("{}/image_gen", config.working_dir.trim_end_matches('/'))
-        };
         Self {
             image_api_url: config.image_api_url.clone(),
             image_api_key: config.image_api_key.clone(),
             image_model: config.image_model.clone(),
             image_default_size: config.image_default_size.clone(),
             image_provider: config.image_provider.clone(),
-            image_output_dir,
+            working_dir: PathBuf::from(&config.working_dir),
+            working_dir_isolation: config.working_dir_isolation,
             http,
         }
     }
@@ -112,7 +111,7 @@ impl Tool for ImageGenTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "image_gen".into(),
-            description: "Generate an image from a text prompt using the configured image generation provider (OpenRouter, OpenAI, Together, Replicate, Stability, etc.). Returns the image URL. The agent should then send the image to the user as a Matrix attachment via send_message, or save the image locally and use it for webpages (Nextcloud upload, embed in HTML, etc.).".into(),
+            description: "Generate an image from a text prompt using the configured image generation provider (OpenRouter, OpenAI, Together, Replicate, Stability, etc.). The image is ALWAYS auto-saved to disk; the tool never returns the raw base64 to keep LLM context small. Just call with `prompt` (and optional `size`/`model`/`n`); the tool result includes the absolute `saved_path`. To send the image as a Matrix attachment, call `send_message` with `attachment_path=<saved_path>`. Only set `save_path` if you need the file at a specific location; otherwise omit it and use the returned `saved_path` directly. If you must use `save_path`, give an absolute path (relative paths may fail with permission errors depending on the chat's working-dir isolation).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,7 +137,7 @@ impl Tool for ImageGenTool {
                     },
                     "save_path": {
                         "type": "string",
-                        "description": "If set, the image bytes are downloaded from the provider URL and saved to this local file path. The tool result then includes both the URL and the local path. Use this when the image will be embedded in a generated webpage or uploaded to Nextcloud."
+                        "description": "OPTIONAL. Absolute path to write the image to. If relative, it's resolved against the chat-isolated working dir. If omitted, the image is auto-saved to the chat-isolated working dir under 'image_gen/' and the path is returned in the result. Prefer omitting this and using the returned saved_path — relative paths have caused real permission errors in the past."
                     }
                 },
                 "required": ["prompt"]
@@ -147,7 +146,10 @@ impl Tool for ImageGenTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let input: ImageGenInput = match serde_json::from_value(input) {
+        // We need the raw `&Value` for chat-isolated working-dir resolution
+        // (it reads the `__microclaw_auth` injection from the input). So
+        // parse into a clone, leaving the original `input` available.
+        let parsed: ImageGenInput = match serde_json::from_value(input.clone()) {
             Ok(v) => v,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
@@ -163,19 +165,19 @@ impl Tool for ImageGenTool {
             ).with_error_type("not_configured");
         }
 
-        let model = input.model.unwrap_or_else(|| self.image_model.clone());
+        let model = parsed.model.unwrap_or_else(|| self.image_model.clone());
         if model.is_empty() {
             return ToolResult::error("No image model configured. Set IMAGE_MODEL or pass model=...".to_string()).with_error_type("not_configured");
         }
-        let size = input.size.unwrap_or_else(|| self.image_default_size.clone());
-        let n = input.n.unwrap_or(1);
+        let size = parsed.size.unwrap_or_else(|| self.image_default_size.clone());
+        let n = parsed.n.unwrap_or(1);
 
         info!(
             provider = %self.image_provider,
             model = %model,
             size = %size,
             n = n,
-            prompt_chars = input.prompt.len(),
+            prompt_chars = parsed.prompt.len(),
             "image_gen: dispatching request"
         );
 
@@ -208,7 +210,7 @@ impl Tool for ImageGenTool {
                 "messages": [
                     {
                         "role": "user",
-                        "content": input.prompt
+                        "content": parsed.prompt
                     }
                 ]
             });
@@ -220,12 +222,12 @@ impl Tool for ImageGenTool {
             let url = format!("{}/images/generations", self.image_api_url.trim_end_matches('/'));
             let mut body = json!({
                 "model": model,
-                "prompt": input.prompt,
+                "prompt": parsed.prompt,
                 "size": size,
                 "n": n,
                 "response_format": "url",
             });
-            if let Some(np) = &input.negative_prompt {
+            if let Some(np) = &parsed.negative_prompt {
                 body["negative_prompt"] = json!(np);
             }
             (url, body)
@@ -345,16 +347,30 @@ impl Tool for ImageGenTool {
         // with hundreds of KB per image, and after a few iterations the
         // context would exceed the model's max length.
         //
+        // Chat-isolated working dir: when `working_dir_isolation: "chat"`
+        // is set, the auto-save dir is `<working_dir>/<channel>/<chat_id>/image_gen/`.
+        // The LLM can then use the returned absolute path directly in
+        // `send_message attachment_path=...` without having to know the
+        // chat-specific dir.
+        //
         // Priority:
-        //  1. If the caller provided an explicit save_path, use that.
+        //  1. If the caller provided an explicit save_path (absolute or
+        //     relative-to-chat-dir), use that.
         //  2. Otherwise, if the URL is a data: URI, decode and write it to
-        //     <image_output_dir>/image_<unix_ts>.<ext> ourselves (reqwest
-        //     can't fetch a data: URI, and we already have the bytes).
-        //  3. Otherwise (http/https URL), do nothing here — the caller can
-        //     pass save_path, or send_message can fetch the URL itself.
-        let saved_path: Option<String> = if let Some(save_path) = &input.save_path {
+        //     <chat-dir>/image_gen/image_<unix_ts>.<ext>.
+        //  3. Otherwise (http/https URL), don't auto-download.
+        let saved_path: Option<Result<String, String>> = if let Some(save_path) = &parsed.save_path {
             if let Some(first_url) = urls.first() {
-                Some(self.persist_first_image(first_url, save_path, &model).await)
+                let chat_dir = resolve_tool_working_dir(
+                    &self.working_dir,
+                    self.working_dir_isolation,
+                    &input,
+                );
+                // Absolute path → use as-is. Relative → resolve against
+                // chat-isolated working dir.
+                let resolved = resolve_tool_path(&chat_dir, save_path);
+                let resolved_str = resolved.to_string_lossy().to_string();
+                Some(self.persist_first_image(first_url, &resolved_str, &model).await)
             } else {
                 None
             }
@@ -370,17 +386,45 @@ impl Tool for ImageGenTool {
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
                     .collect();
-                let default_path = format!(
-                    "{}/image_{}_{}.{}",
-                    self.image_output_dir, safe_model, ts, ext
+                let chat_dir = resolve_tool_working_dir(
+                    &self.working_dir,
+                    self.working_dir_isolation,
+                    &input,
                 );
-                Some(self.write_data_uri_to_path(stripped, &default_path, &model))
+                let image_gen_subdir = chat_dir.join("image_gen");
+                // Best-effort create the dir; we surface write failure to
+                // the LLM, but we want to be sure the dir exists first.
+                if let Err(e) = std::fs::create_dir_all(&image_gen_subdir) {
+                    warn!(
+                        error = %e,
+                        dir = %image_gen_subdir.display(),
+                        "image_gen: failed to create image_gen subdir"
+                    );
+                }
+                let default_path = image_gen_subdir.join(
+                    format!("image_{}_{}.{}", safe_model, ts, ext)
+                );
+                let default_path_str = default_path.to_string_lossy().to_string();
+                Some(self.write_data_uri_to_path(stripped, &default_path_str, &model))
             } else {
                 // Real http/https URL — don't auto-download; just report it.
                 None
             }
         } else {
             None
+        };
+
+        // Propagate any save error to the LLM. The previous implementation
+        // returned the dest_path even on write failure, which made the LLM
+        // (and the user) believe the file existed when it didn't. Now the
+        // LLM sees the actual error and can retry with a different path.
+        let saved_path: Option<String> = match saved_path {
+            Some(Ok(p)) => Some(p),
+            Some(Err(e)) => return ToolResult::error(format!(
+                "image_gen: failed to save image to disk: {e}. \
+                 Try again with an absolute save_path in /tmp/ or /home/microclaw/.microclaw/workspace/."
+            )),
+            None => None,
         };
 
         // Build tool result. CRITICAL: do NOT include the raw data: URI in
@@ -454,87 +498,106 @@ fn detect_image_extension_from_data_uri(stripped: &str) -> &'static str {
 impl ImageGenTool {
     /// Persist the first image (from `first_url`) to `dest_path`. Used when
     /// the caller passed an explicit `save_path` and the URL is either an
-    /// http(s) URL or a `data:` URI. Returns the path on success, or
-    /// `dest_path` on a write error (so the LLM still gets a deterministic
-    /// field, with the next_steps text indicating failure is in the log).
+    /// http(s) URL or a `data:` URI. Returns the path on success, or an
+    /// error string on failure (the previous version silently returned
+    /// `dest_path` even when the write failed, which misled the LLM into
+    /// thinking the file existed when it didn't).
     async fn persist_first_image(
         &self,
         first_url: &str,
         dest_path: &str,
         model: &str,
-    ) -> String {
+    ) -> Result<String, String> {
         if let Some(stripped) = first_url.strip_prefix("data:") {
-            self.write_data_uri_to_path(stripped, dest_path, model);
-            return dest_path.to_string();
+            return self.write_data_uri_to_path(stripped, dest_path, model);
         }
         // HTTP(S) URL: try to GET the bytes and write to disk.
-        match self.http.get(first_url).send().await {
-            Ok(r) if r.status().is_success() => match r.bytes().await {
-                Ok(bytes) => {
-                    if let Some(parent) = std::path::Path::new(dest_path).parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if let Err(e) = std::fs::write(dest_path, &bytes) {
-                        warn!(error = %e, save_path = %dest_path, model = %model, "image_gen: failed to write file");
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, model = %model, "image_gen: failed to download bytes");
-                }
-            },
-            Ok(r) => {
-                warn!(status = %r.status(), model = %model, "image_gen: download returned non-2xx");
-            }
+        let resp = match self.http.get(first_url).send().await {
+            Ok(r) => r,
             Err(e) => {
-                // NOTE: do not log the full data URI as part of the error
-                // message — that can produce multi-MB log lines. The reqwest
-                // Display impl typically only shows the URL, which is fine
-                // for non-data URLs and a small constant for data URIs in
-                // modern reqwest versions. Older versions inlined the whole
-                // URL in the error string; if that becomes a problem we'll
-                // need a custom Display for the data: case.
-                warn!(error = %e, model = %model, url_prefix = %&first_url.chars().take(40).collect::<String>(), "image_gen: download request failed");
-            }
-        }
-        dest_path.to_string()
-    }
-
-    /// Decode a `data:` URI payload (the part after `data:`) and write the
-    /// raw bytes to `dest_path`. Returns `dest_path` regardless of success
-    /// (errors are logged). Caller is expected to have already ensured
-    /// `dest_path`'s parent directory exists.
-    fn write_data_uri_to_path(&self, stripped: &str, dest_path: &str, model: &str) -> String {
-        // stripped looks like "image/png;base64,...." — split off the base64
-        // payload. Note: the spec also allows URL-encoded data, but
-        // OpenRouter and friends always use base64.
-        let payload = match stripped.find(',') {
-            Some(i) => &stripped[i + 1..],
-            None => {
-                warn!(model = %model, dest_path = %dest_path, "image_gen: data URI missing comma separator");
-                return dest_path.to_string();
+                let prefix = first_url.chars().take(40).collect::<String>();
+                warn!(error = %e, model = %model, url_prefix = %prefix, "image_gen: download request failed");
+                return Err(format!(
+                    "download request failed for {prefix}...: {e}"
+                ));
             }
         };
-        let bytes = match base64_decode(payload) {
-            Some(b) => b,
-            None => {
-                warn!(model = %model, dest_path = %dest_path, "image_gen: data URI base64 decode failed");
-                return dest_path.to_string();
+        if !resp.status().is_success() {
+            warn!(status = %resp.status(), model = %model, "image_gen: download returned non-2xx");
+            return Err(format!(
+                "download returned HTTP {}",
+                resp.status()
+            ));
+        }
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, model = %model, "image_gen: failed to download bytes");
+                return Err(format!("failed to download bytes: {e}"));
             }
         };
         if let Some(parent) = std::path::Path::new(dest_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
+            // Surface create_dir failures — silent ignore was a real bug
+            // in the old code path.
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("failed to create parent dir {}: {e}", parent.display())
+            })?;
         }
-        if let Err(e) = std::fs::write(dest_path, &bytes) {
+        std::fs::write(dest_path, &bytes).map_err(|e| {
+            warn!(error = %e, save_path = %dest_path, model = %model, "image_gen: failed to write file");
+            format!("failed to write {}: {e}", dest_path)
+        })?;
+        info!(
+            model = %model,
+            dest_path = %dest_path,
+            bytes = bytes.len(),
+            "image_gen: saved http(s) URL bytes to disk"
+        );
+        Ok(dest_path.to_string())
+    }
+
+    /// Decode a `data:` URI payload (the part after `data:`) and write the
+    /// raw bytes to `dest_path`. Returns the path on success, or an error
+    /// string on failure (the previous version returned `dest_path` on
+    /// failure too, which masked real filesystem errors from the LLM).
+    fn write_data_uri_to_path(
+        &self,
+        stripped: &str,
+        dest_path: &str,
+        model: &str,
+    ) -> Result<String, String> {
+        // stripped looks like "image/png;base64,...." — split off the base64
+        // payload. Note: the spec also allows URL-encoded data, but
+        // OpenRouter and friends always use base64.
+        let payload = stripped.find(',')
+            .map(|i| &stripped[i + 1..])
+            .ok_or_else(|| {
+                warn!(model = %model, dest_path = %dest_path, "image_gen: data URI missing comma separator");
+                format!("data URI missing comma separator (dest_path={dest_path})")
+            })?;
+        let bytes = base64_decode(payload)
+            .ok_or_else(|| {
+                warn!(model = %model, dest_path = %dest_path, "image_gen: data URI base64 decode failed");
+                format!("data URI base64 decode failed (dest_path={dest_path})")
+            })?;
+        if let Some(parent) = std::path::Path::new(dest_path).parent() {
+            // Surface create_dir failures — silent ignore was a real bug
+            // in the old code path.
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("failed to create parent dir {}: {e}", parent.display())
+            })?;
+        }
+        std::fs::write(dest_path, &bytes).map_err(|e| {
             warn!(error = %e, dest_path = %dest_path, model = %model, "image_gen: write failed");
-            return dest_path.to_string();
-        }
+            format!("failed to write {dest_path}: {e}")
+        })?;
         info!(
             model = %model,
             dest_path = %dest_path,
             bytes = bytes.len(),
             "image_gen: auto-saved data URI to disk"
         );
-        dest_path.to_string()
+        Ok(dest_path.to_string())
     }
 }
 
