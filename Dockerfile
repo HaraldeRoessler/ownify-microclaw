@@ -4,12 +4,22 @@ ARG NODE_VERSION=20
 ARG RUST_VERSION=1.93.1
 
 # Stage 1: Build embedded web assets so the binary does not depend on checked-in dist files.
-FROM node:${NODE_VERSION}-bookworm-slim AS web-builder
+FROM --platform=linux/amd64 node:${NODE_VERSION}-bookworm-slim AS web-builder
 
 WORKDIR /usr/src/microclaw/web
 
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+# --include=optional forces npm to fetch the lightningcss native
+# binary for the target platform (linux-x64-gnu). Without this
+# flag, npm omits optional dependencies on foreign arches
+# (e.g. building for linux/amd64 from a darwin/arm64 host), and
+# vite.config.ts's `import { transform } from 'lightningcss'` then
+# fails at build time with "Cannot find module
+# 'lightningcss-linux-x64-gnu'". We saw this exact error on the
+# 2026-06-10 ownify fork build (PR dd5cf6c). See web/package.json
+# `optionalDependencies` for the full list of native packages this
+# protects.
+RUN npm ci --include=optional
 
 COPY web ./
 RUN npm run build
