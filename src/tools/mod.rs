@@ -12,6 +12,7 @@ pub mod fuzzy_match;
 pub mod generate_image;
 pub mod glob;
 pub mod grep;
+pub mod image_gen;
 pub mod insights;
 pub mod knowledge_graph;
 pub mod mcp;
@@ -327,6 +328,13 @@ impl ToolRegistry {
                 },
                 config.bot_username_overrides(),
             )),
+            // Ownify-fork: the OLD image_gen tool that handles OpenRouter
+            // via /v1/chat/completions with modalities:["image"]. The
+            // upstream v0.2.2 generate_image tool only supports the
+            // OpenAI /v1/images/generations shape, which OpenRouter does
+            // not implement. We register BOTH so users on OpenAI direct
+            // (or other OpenAI-compatible providers) can use either.
+            Box::new(image_gen::ImageGenTool::new(config)),
             Box::new(generate_image::GenerateImageTool::new(
                 config,
                 channel_registry.clone(),
@@ -450,6 +458,10 @@ impl ToolRegistry {
             ),
             Box::new(fetch_artifact::FetchArtifactTool::new(db.clone())),
             Box::new(describe_image::DescribeImageTool::new(config)),
+            // Ownify-fork: register old image_gen (OpenRouter-compatible)
+            // alongside the new generate_image. See comment on the
+            // primary registration in build_full_agent_registry above.
+            Box::new(image_gen::ImageGenTool::new(config)),
             Box::new(consult_specialist::ConsultSpecialistTool::new(config)),
         ];
         // Visual creation + progress reporting: available to specialists whenever a

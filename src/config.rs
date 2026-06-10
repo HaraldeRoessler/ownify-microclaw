@@ -287,10 +287,22 @@ fn default_subagent_announce_relay_interval_secs() -> u64 {
     15
 }
 fn default_subagent_max_tokens_per_run() -> i64 {
-    400_000
+    200_000
 }
 fn default_subagent_orchestrate_max_workers() -> usize {
     5
+}
+fn default_subagent_retry_on_budget_exceeded() -> bool {
+    true
+}
+fn default_subagent_max_budget_retries() -> u32 {
+    1
+}
+fn default_subagent_budget_retry_multiplier() -> f64 {
+    4.0
+}
+fn default_subagent_proactive_prompt_on_failure() -> bool {
+    true
 }
 fn default_subagent_acp_auto_approve() -> bool {
     true
@@ -872,6 +884,24 @@ pub struct SubagentConfig {
     pub max_tokens_per_run: i64,
     #[serde(default = "default_subagent_orchestrate_max_workers")]
     pub orchestrate_max_workers: usize,
+    /// When a subagent run terminates with `budget_exceeded`, automatically
+    /// spawn a fresh continuation run with a larger token budget. Default: true.
+    #[serde(default = "default_subagent_retry_on_budget_exceeded")]
+    pub retry_on_budget_exceeded: bool,
+    /// Maximum number of auto-retries after a `budget_exceeded` failure.
+    /// Default: 1. Capped at 3 in `normalize()` to prevent runaway loops.
+    #[serde(default = "default_subagent_max_budget_retries")]
+    pub max_budget_retries: u32,
+    /// Multiplier applied to the original token budget for each retry.
+    /// Default: 4.0. The result is clamped to `max_tokens_per_run`.
+    #[serde(default = "default_subagent_budget_retry_multiplier")]
+    pub budget_retry_multiplier: f64,
+    /// When a subagent run finally fails (after retries), post a proactive
+    /// "what next?" prompt into the chat so the user can decide how to proceed.
+    /// Default: true. The message is delivered via the same channel as the
+    /// caller (Matrix/Telegram/etc.) and does NOT trigger a new LLM turn.
+    #[serde(default = "default_subagent_proactive_prompt_on_failure")]
+    pub proactive_prompt_on_failure: bool,
     #[serde(default)]
     pub acp: SubagentAcpConfig,
     #[serde(default)]
@@ -894,6 +924,10 @@ impl Default for SubagentConfig {
             announce_relay_interval_secs: default_subagent_announce_relay_interval_secs(),
             max_tokens_per_run: default_subagent_max_tokens_per_run(),
             orchestrate_max_workers: default_subagent_orchestrate_max_workers(),
+            retry_on_budget_exceeded: default_subagent_retry_on_budget_exceeded(),
+            max_budget_retries: default_subagent_max_budget_retries(),
+            budget_retry_multiplier: default_subagent_budget_retry_multiplier(),
+            proactive_prompt_on_failure: default_subagent_proactive_prompt_on_failure(),
             acp: SubagentAcpConfig::default(),
             standup: SubagentStandupConfig::default(),
         }
@@ -1333,6 +1367,29 @@ pub struct Config {
     pub embedding_dim: Option<usize>,
     #[serde(default)]
     pub openai_api_key: Option<String>,
+
+    // --- Image generation (IMAGE_* env vars, set via ownify-skill-credentials Secret) ---
+    /// Image generation provider name (e.g. "openrouter", "openai", "together").
+    /// When unset, the image_gen tool returns a friendly error.
+    /// Ownify-fork: this is the OLD-style config (top-level fields). The
+    /// upstream v0.2.2 `media.image_gen.*` path is kept for forward compat
+    /// but the image_gen tool reads from these top-level fields.
+    #[serde(default)]
+    pub image_provider: String,
+    /// API key for the image gen provider. Read from IMAGE_API_KEY env var.
+    #[serde(default)]
+    pub image_api_key: String,
+    /// Base URL of the image gen endpoint (e.g. "https://openrouter.ai/api/v1").
+    /// Read from IMAGE_API_URL env var.
+    #[serde(default)]
+    pub image_api_url: String,
+    /// Default image model to use. Read from IMAGE_MODEL env var.
+    /// (Tools may override per-call.)
+    #[serde(default)]
+    pub image_model: String,
+    /// Default image size, e.g. "1024x1024". Read from IMAGE_DEFAULT_SIZE env var.
+    #[serde(default = "default_image_size")]
+    pub image_default_size: String,
 
     // --- Pricing ---
     #[serde(default = "default_model_prices")]
@@ -1864,6 +1921,11 @@ impl Config {
             bash_dangerous_patterns: default_bash_dangerous_patterns(),
             sandbox: SandboxConfig::default(),
             openai_api_key: None,
+            image_provider: String::new(),
+            image_api_key: String::new(),
+            image_api_url: String::new(),
+            image_model: String::new(),
+            image_default_size: default_image_size(),
             override_timezone: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],
@@ -2147,6 +2209,35 @@ impl Config {
 
     /// Apply post-deserialization normalization and validation.
     pub(crate) fn post_deserialize(&mut self) -> Result<(), MicroClawError> {
+        // Env-var override for image generation (ownify-fork). K8s env vars
+        // set via ownify-skill-credentials-<slug> Secret take precedence over
+        // YAML values, but YAML is kept when env is unset (local dev).
+        if let Ok(v) = std::env::var("IMAGE_PROVIDER") {
+            if !v.trim().is_empty() {
+                self.image_provider = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_API_KEY") {
+            if !v.trim().is_empty() {
+                self.image_api_key = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_API_URL") {
+            if !v.trim().is_empty() {
+                self.image_api_url = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_MODEL") {
+            if !v.trim().is_empty() {
+                self.image_model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("IMAGE_DEFAULT_SIZE") {
+            if !v.trim().is_empty() {
+                self.image_default_size = v;
+            }
+        }
+
         self.llm_provider = self.llm_provider.trim().to_lowercase();
 
         self.model = resolve_model_name_with_fallback(&self.llm_provider, Some(&self.model), None);
@@ -2406,6 +2497,16 @@ Use operator password + API keys for Web auth."
         }
         self.subagents.orchestrate_max_workers =
             self.subagents.orchestrate_max_workers.clamp(1, 12);
+        // Clamp budget-retry settings to sane bounds.
+        if self.subagents.max_budget_retries > 3 {
+            self.subagents.max_budget_retries = 3;
+        }
+        if !(self.subagents.budget_retry_multiplier.is_finite()
+            && self.subagents.budget_retry_multiplier >= 1.5
+            && self.subagents.budget_retry_multiplier <= 16.0)
+        {
+            self.subagents.budget_retry_multiplier = default_subagent_budget_retry_multiplier();
+        }
         self.subagents.acp.normalize();
         self.tool_timeout_overrides = self
             .tool_timeout_overrides

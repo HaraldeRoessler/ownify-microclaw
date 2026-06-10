@@ -99,18 +99,29 @@ fn compute_child_token_budget(
     configured_max: i64,
 ) -> Result<i64, String> {
     let configured_max = configured_max.clamp(2_000, 2_000_000);
+    // Explicit user request always wins (clamped to configured_max).
+    if let Some(req) = requested_budget {
+        return Ok(req.clamp(2_000, configured_max));
+    }
+    // No explicit request: prefer configured_max so long-running subagent tasks
+    // can complete even when the parent chat is near context capacity.
+    // We still cap at configured_max; the auto-retry-on-budget-exceeded loop
+    // handles the rare case where even configured_max is insufficient.
     if let Some(parent_remaining) = parent_budget_remaining {
         if parent_remaining < 2_000 {
+            // Parent is essentially out of context; refuse cleanly with a
+            // helpful error so the parent LLM can re-summarize and retry.
             return Err(format!(
                 "subagent budget exhausted: parent remaining {} < 2000",
                 parent_remaining
             ));
         }
-        let desired = requested_budget.unwrap_or((parent_remaining / 2).max(2_000));
-        return Ok(desired.clamp(2_000, parent_remaining.min(configured_max)));
+        // Use configured_max, but if parent remaining is much smaller we cap
+        // at parent_remaining so we don't immediately blow the parent out.
+        let cap = parent_remaining.min(configured_max);
+        return Ok(configured_max.min(cap.max(2_000)));
     }
-    let desired = requested_budget.unwrap_or(configured_max);
-    Ok(desired.clamp(2_000, configured_max))
+    Ok(configured_max)
 }
 
 pub(crate) fn normalize_subagent_artifact_payload(raw_text: &str) -> (String, String) {
@@ -990,132 +1001,139 @@ impl Tool for SessionsSpawnTool {
         let channel_registry = self.channel_registry.clone();
         let subagent_channel_registry = self.channel_registry.clone();
         let fan_in_channel_registry = self.channel_registry.clone();
+        // Clone values that are needed both inside the spawned closure AND
+        // after the spawn returns (in the ToolResult::success JSON below).
+        let label_for_response = label.clone();
+        let parent_run_id_for_response = parent_run_id.clone();
         tokio::spawn(async move {
-            let run_id_for_finish = run_id_async.clone();
-            let _ = call_blocking(db.clone(), {
-                let run_id = run_id_async.clone();
-                move |db| db.mark_subagent_queued(&run_id)
-            })
-            .await;
-            log_subagent_event(db.clone(), &run_id_async, "queued", None).await;
+            // ---------------------------------------------------------------
+            // Run the subagent task with optional auto-retry on budget_exceeded.
+            //
+            // On `budget_exceeded`, if `retry_on_budget_exceeded` is true and we
+            // have retries left, we create a fresh subagent run with a multiplied
+            // token budget and a `parent_run_id` link. The user sees one chained
+            // task; the original run stays in the DB with `status='budget_exceeded'`
+            // for observability.
+            //
+            // After the retry loop exits (success or final failure), the announce
+            // fires once for the LAST run, and (if the run failed) the proactive
+            // "what next?" prompt is posted into the chat.
+            // ---------------------------------------------------------------
+            let retry_on_budget = cfg.subagents.retry_on_budget_exceeded;
+            let max_retries = cfg.subagents.max_budget_retries;
+            let multiplier = cfg.subagents.budget_retry_multiplier;
+            let proactive_prompt = cfg.subagents.proactive_prompt_on_failure;
 
-            let _permit = match runtime.semaphore.acquire().await {
-                Ok(p) => p,
-                Err(_) => {
-                    let _ = call_blocking(db.clone(), move |db| {
-                        db.mark_subagent_finished(FinishSubagentRunParams {
-                            run_id: &run_id_for_finish,
-                            status: "failed",
-                            error_text: Some("subagent runtime is shutting down"),
-                            result_text: None,
-                            artifact_json: None,
-                            input_tokens: 0,
-                            output_tokens: 0,
+            // Track the most recent run so the post-loop announce uses fresh data.
+            let mut current_run_id = run_id_async.clone();
+            let mut current_budget = child_token_budget;
+            #[allow(unused_assignments)]
+            let mut last_outcome: Result<
+                (String, String, i64, i64),
+                String,
+            > = Err("no_attempt".to_string());
+            let mut attempts: u32 = 0;
+            // Sum tokens across all attempts for the final announce.
+            let mut total_input: i64 = 0;
+            let mut total_output: i64 = 0;
+
+            'retry: loop {
+                let run_id_for_finish = current_run_id.clone();
+                let _ = call_blocking(db.clone(), {
+                    let run_id = current_run_id.clone();
+                    move |db| db.mark_subagent_queued(&run_id)
+                })
+                .await;
+                log_subagent_event(db.clone(), &current_run_id, "queued", None).await;
+
+                let _permit = match runtime.semaphore.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let _ = call_blocking(db.clone(), move |db| {
+                            db.mark_subagent_finished(FinishSubagentRunParams {
+                                run_id: &run_id_for_finish,
+                                status: "failed",
+                                error_text: Some("subagent runtime is shutting down"),
+                                result_text: None,
+                                artifact_json: None,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            })
                         })
-                    })
-                    .await;
-                    runtime.remove_run(&run_id_async);
-                    return;
-                }
-            };
+                        .await;
+                        runtime.remove_run(&current_run_id);
+                        last_outcome = Err("subagent runtime is shutting down".to_string());
+                        break 'retry;
+                    }
+                };
 
-            let _ = call_blocking(db.clone(), {
-                let run_id = run_id_async.clone();
-                move |db| db.mark_subagent_running(&run_id)
-            })
-            .await;
-            log_subagent_event(db.clone(), &run_id_async, "running", None).await;
+                let _ = call_blocking(db.clone(), {
+                    let run_id = current_run_id.clone();
+                    move |db| db.mark_subagent_running(&run_id)
+                })
+                .await;
+                log_subagent_event(
+                    db.clone(),
+                    &current_run_id,
+                    "running",
+                    Some(format!("attempt={attempts} budget={current_budget}")),
+                )
+                .await;
 
-            let timeout_secs = cfg.subagents.run_timeout_secs;
-            let run_future = run_sub_agent_task(RunSubAgentTaskParams {
-                config: cfg.clone(),
-                db: db.clone(),
-                channel_registry: subagent_channel_registry,
-                auth_context: auth_async,
-                run_id: run_id_async.clone(),
-                runtime: execution_runtime,
-                acp_target,
-                depth: child_depth,
-                run_token_budget: child_token_budget,
-                task: task_async,
-                context: context_async,
-                specialist: specialist_async,
-                local_cancel,
-            });
+                let timeout_secs = cfg.subagents.run_timeout_secs;
+                let run_future = run_sub_agent_task(RunSubAgentTaskParams {
+                    config: cfg.clone(),
+                    db: db.clone(),
+                    channel_registry: subagent_channel_registry.clone(),
+                    auth_context: auth_async.clone(),
+                    run_id: current_run_id.clone(),
+                    runtime: execution_runtime,
+                    acp_target: acp_target.clone(),
+                    depth: child_depth,
+                    run_token_budget: current_budget,
+                    task: task_async.clone(),
+                    context: context_async.clone(),
+                    specialist: specialist_async.clone(),
+                    local_cancel: local_cancel.clone(),
+                });
 
-            let final_outcome = if timeout_secs > 0 {
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), run_future)
+                let final_outcome = if timeout_secs > 0 {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout_secs),
+                        run_future,
+                    )
                     .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err("timed_out".to_string()),
-                }
-            } else {
-                run_future.await
-            };
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err("timed_out".to_string()),
+                    }
+                } else {
+                    run_future.await
+                };
 
-            match final_outcome {
-                Ok((result, artifact_json, input_tokens, output_tokens)) => {
-                    let rid = run_id_for_finish.clone();
-                    let _ = call_blocking(db.clone(), move |db| {
-                        db.mark_subagent_finished(FinishSubagentRunParams {
-                            run_id: &rid,
-                            status: "completed",
-                            error_text: None,
-                            result_text: Some(&result),
-                            artifact_json: Some(&artifact_json),
-                            input_tokens,
-                            output_tokens,
-                        })
-                    })
-                    .await;
-                    log_subagent_event(db.clone(), &run_id_for_finish, "completed", None).await;
+                // Accumulate token usage across attempts (for the final announce).
+                if let Ok((_, _, inp, outp)) = &final_outcome {
+                    total_input += inp;
+                    total_output += outp;
                 }
-                Err(err) if err == "cancelled" => {
+
+                // Decide whether to retry. Only `budget_exceeded` qualifies.
+                let should_retry = matches!(&final_outcome, Err(e) if e.contains("budget_exceeded:"))
+                    && retry_on_budget
+                    && attempts < max_retries;
+
+                if should_retry {
+                    // Mark this run as budget_exceeded (preserves history).
                     let rid = run_id_for_finish.clone();
-                    let _ = call_blocking(db.clone(), move |db| {
-                        db.mark_subagent_finished(FinishSubagentRunParams {
-                            run_id: &rid,
-                            status: "cancelled",
-                            error_text: Some("Cancelled by user"),
-                            result_text: None,
-                            artifact_json: None,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        })
-                    })
-                    .await;
-                    log_subagent_event(db.clone(), &run_id_for_finish, "cancelled", None).await;
-                }
-                Err(err) if err == "timed_out" => {
-                    let rid = run_id_for_finish.clone();
-                    let _ = call_blocking(db.clone(), move |db| {
-                        db.mark_subagent_finished(FinishSubagentRunParams {
-                            run_id: &rid,
-                            status: "timed_out",
-                            error_text: Some("Sub-agent run exceeded configured timeout"),
-                            result_text: None,
-                            artifact_json: None,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        })
-                    })
-                    .await;
-                    log_subagent_event(db.clone(), &run_id_for_finish, "timed_out", None).await;
-                }
-                Err(err) => {
-                    let rid = run_id_for_finish.clone();
-                    let err_for_db = err.clone();
-                    let status = if err_for_db.contains("budget_exceeded:") {
-                        "budget_exceeded"
-                    } else {
-                        "failed"
+                    let err_text = match &final_outcome {
+                        Err(e) => e.clone(),
+                        Ok(_) => String::new(),
                     };
                     let _ = call_blocking(db.clone(), move |db| {
                         db.mark_subagent_finished(FinishSubagentRunParams {
                             run_id: &rid,
-                            status,
-                            error_text: Some(&err_for_db),
+                            status: "budget_exceeded",
+                            error_text: Some(&err_text),
                             result_text: None,
                             artifact_json: None,
                             input_tokens: 0,
@@ -1123,28 +1141,267 @@ impl Tool for SessionsSpawnTool {
                         })
                     })
                     .await;
-                    log_subagent_event(db.clone(), &run_id_for_finish, "failed", Some(err)).await;
+                    log_subagent_event(
+                        db.clone(),
+                        &run_id_for_finish,
+                        "budget_exceeded_retrying",
+                        Some(format!(
+                            "will retry with budget {} ({}x multiplier)",
+                            ((current_budget as f64) * multiplier) as i64,
+                            multiplier
+                        )),
+                    )
+                    .await;
+                    runtime.remove_run(&run_id_for_finish);
+
+                    // Allocate a new run for the retry, linked to the previous
+                    // one as its parent. This keeps the chain visible in the
+                    // subagent_runs table.
+                    let new_run_id = format!("subrun-{}", uuid::Uuid::new_v4());
+                    // Clone for the closure AND for the post-insert log.
+                    let new_run_id_for_closure = new_run_id.clone();
+                    let prev_run_id = current_run_id.clone();
+                    let new_budget = (((current_budget as f64) * multiplier) as i64)
+                        .clamp(2_000, cfg.subagents.max_tokens_per_run);
+                    let provider = cfg.llm_provider.clone();
+                    let model = cfg.model.clone();
+                    let caller_channel = auth_async.caller_channel.clone();
+                    let task_for_insert = task_async.clone();
+                    let context_for_insert = context_async.clone();
+                    let label_for_insert = label.clone();
+                    let new_budget_for_insert = new_budget;
+                    let chat_id_for_insert = chat_id;
+                    if let Err(e) = call_blocking(db.clone(), move |db| {
+                        db.create_subagent_run(CreateSubagentRunParams {
+                            run_id: &new_run_id_for_closure,
+                            parent_run_id: Some(&prev_run_id),
+                            depth: child_depth,
+                            token_budget: new_budget_for_insert,
+                            chat_id: chat_id_for_insert,
+                            caller_channel: &caller_channel,
+                            task: &task_for_insert,
+                            context: &context_for_insert,
+                            provider: &provider,
+                            model: &model,
+                            label: label_for_insert.as_deref(),
+                        })
+                    })
+                    .await
+                    {
+                        warn!("failed to create retry subagent run: {e}");
+                        last_outcome = final_outcome;
+                        break 'retry;
+                    }
+                    log_subagent_event(
+                        db.clone(),
+                        &new_run_id,
+                        "accepted",
+                        Some(format!(
+                            "continuation of {} (attempt={} budget={})",
+                            run_id_for_finish,
+                            attempts + 1,
+                            new_budget
+                        )),
+                    )
+                    .await;
+
+                    // Brief user-facing ack so the chat shows a "retrying" note.
+                    if cfg.subagents.announce_to_chat && attempts == 0 {
+                        let note = format!(
+                            "♻️ Subagent hit its token budget, retrying with a larger budget ({new_budget} tokens). Previous run `{run_id_for_finish}` is preserved in the subagent history."
+                        );
+                        let bot_username =
+                            cfg.bot_username_for_channel(&auth_async.caller_channel);
+                        let _ = deliver_and_store_bot_message(
+                            channel_registry.as_ref(),
+                            db.clone(),
+                            &bot_username,
+                            chat_id,
+                            &note,
+                        )
+                        .await;
+                    }
+
+                    current_run_id = new_run_id;
+                    current_budget = new_budget;
+                    attempts += 1;
+                    continue 'retry;
                 }
+
+                // Stash the final outcome for the post-loop announce and
+                // proactive prompt BEFORE we move its fields into the DB closures.
+                last_outcome = final_outcome;
+
+                // Record the final outcome in DB. We must clone all values
+                // BEFORE entering the call_blocking closure, because the
+                // closure is `move` and captures for `'static`. We also
+                // drop the borrow on `last_outcome` immediately after the
+                // match by NOT keeping any references into it.
+                let outcome_for_db = last_outcome.clone();
+                match &outcome_for_db {
+                    Ok((result, artifact_json, input_tokens, output_tokens)) => {
+                        let rid = run_id_for_finish.clone();
+                        let result_owned = result.clone();
+                        let artifact_owned = artifact_json.clone();
+                        let inp = *input_tokens;
+                        let outp = *output_tokens;
+                        let _ = call_blocking(db.clone(), move |db| {
+                            db.mark_subagent_finished(FinishSubagentRunParams {
+                                run_id: &rid,
+                                status: "completed",
+                                error_text: None,
+                                result_text: Some(&result_owned),
+                                artifact_json: Some(&artifact_owned),
+                                input_tokens: inp,
+                                output_tokens: outp,
+                            })
+                        })
+                        .await;
+                        log_subagent_event(
+                            db.clone(),
+                            &run_id_for_finish,
+                            "completed",
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(err) if err == "cancelled" => {
+                        let rid = run_id_for_finish.clone();
+                        let _ = call_blocking(db.clone(), move |db| {
+                            db.mark_subagent_finished(FinishSubagentRunParams {
+                                run_id: &rid,
+                                status: "cancelled",
+                                error_text: Some("Cancelled by user"),
+                                result_text: None,
+                                artifact_json: None,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            })
+                        })
+                        .await;
+                        log_subagent_event(
+                            db.clone(),
+                            &run_id_for_finish,
+                            "cancelled",
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(err) if err == "timed_out" => {
+                        let rid = run_id_for_finish.clone();
+                        let _ = call_blocking(db.clone(), move |db| {
+                            db.mark_subagent_finished(FinishSubagentRunParams {
+                                run_id: &rid,
+                                status: "timed_out",
+                                error_text: Some("Sub-agent run exceeded configured timeout"),
+                                result_text: None,
+                                artifact_json: None,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            })
+                        })
+                        .await;
+                        log_subagent_event(
+                            db.clone(),
+                            &run_id_for_finish,
+                            "timed_out",
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        let rid = run_id_for_finish.clone();
+                        let err_for_db = err.clone();
+                        let err_for_event = err.clone();
+                        let status = if err_for_db.contains("budget_exceeded:") {
+                            "budget_exceeded"
+                        } else {
+                            "failed"
+                        };
+                        let _ = call_blocking(db.clone(), move |db| {
+                            db.mark_subagent_finished(FinishSubagentRunParams {
+                                run_id: &rid,
+                                status,
+                                error_text: Some(&err_for_db),
+                                result_text: None,
+                                artifact_json: None,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            })
+                        })
+                        .await;
+                        log_subagent_event(
+                             db.clone(),
+                             &run_id_for_finish,
+                             "failed",
+                             Some(err_for_event),
+                         )
+                         .await;
+                    }
+                }
+
+                runtime.remove_run(&run_id_for_finish);
+                break 'retry;
             }
 
-            runtime.remove_run(&run_id_async);
-
+            // After retry loop: announce the LAST run (the one that actually
+            // produced the final outcome). The chain is visible in
+            // subagent_runs.parent_run_id for anyone who wants to inspect it.
             if cfg.subagents.announce_to_chat {
-                match build_announce_payload(db.clone(), chat_id, &run_id_async).await {
+                match build_announce_payload(db.clone(), chat_id, &current_run_id).await {
                     Ok(payload) => {
-                        let rid = run_id_async.clone();
+                        let rid = current_run_id.clone();
                         let caller_channel = auth.caller_channel.clone();
                         let _ = call_blocking(db.clone(), move |db| {
                             db.enqueue_subagent_announce(&rid, chat_id, &caller_channel, &payload)
                         })
                         .await;
-                        let _ =
-                            flush_pending_announces_once(&cfg, channel_registry, db.clone(), 10)
-                                .await;
+                        let _ = flush_pending_announces_once(
+                            &cfg,
+                            channel_registry.clone(),
+                            db.clone(),
+                            10,
+                        )
+                        .await;
                     }
                     Err(e) => {
-                        warn!("failed to build announce payload for run {run_id_async}: {e}");
+                        warn!("failed to build announce payload for run {current_run_id}: {e}");
                     }
+                }
+            }
+
+            // Proactive "what next?" prompt on final failure.
+            if proactive_prompt && last_outcome.is_err() {
+                let is_budget = matches!(&last_outcome, Err(e) if e.contains("budget_exceeded:"));
+                let is_timeout = matches!(&last_outcome, Err(e) if e == "timed_out");
+                let reason_label = if is_budget {
+                    "hit its token budget"
+                } else if is_timeout {
+                    "timed out"
+                } else {
+                    "encountered an error"
+                };
+                let last_run = &current_run_id;
+                let prompt_text = format!(
+                    "❓ The subagent {reason_label} after {attempts} attempt(s). Last run: `{last_run}`.\n\n\
+                     How would you like to proceed?\n\
+                     1. Retry with a larger budget — say \"retry with bigger budget\" (I'll pass a higher token cap).\n\
+                     2. Split the task into smaller sub-tasks and run them in parallel.\n\
+                     3. Skip the subagent and have me do it directly (slower, but no extra budget).\n\
+                     4. Drop it and move on.\n\n\
+                     Tip: you can also just describe what you want next and I'll figure it out."
+                );
+                let bot_username = cfg.bot_username_for_channel(&auth.caller_channel);
+                if let Err(e) = deliver_and_store_bot_message(
+                    channel_registry.as_ref(),
+                    db.clone(),
+                    &bot_username,
+                    chat_id,
+                    &prompt_text,
+                )
+                .await
+                {
+                    warn!("failed to post proactive prompt: {e}");
                 }
             }
 
@@ -1172,11 +1429,11 @@ impl Tool for SessionsSpawnTool {
                 "chat_id": chat_id,
                 "depth": child_depth,
                 "specialist": specialist,
-                "label": label,
+                "label": label_for_response,
                 "runtime": execution_runtime.as_str(),
                 "runtime_target": runtime_target,
                 "token_budget": child_token_budget,
-                "parent_run_id": parent_run_id,
+                "parent_run_id": parent_run_id_for_response,
             })
             .to_string(),
         )
