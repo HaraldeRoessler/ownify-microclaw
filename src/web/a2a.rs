@@ -172,6 +172,19 @@ pub(super) async fn api_a2a_message(
         .unwrap_or_else(|| "a2a-remote".to_string());
 
     let allowed_tools = allowed_tools_for_caller(&headers);
+    // Extract images from the A2A request, if any. We treat the wire
+    // shape as a trusted internal contract — only the a2a-gateway (or
+    // a peer running an updated ownify-microclaw) sets this field, and
+    // both have already passed the bearer-token check at the top of
+    // this function. Each (base64, mime) pair is forwarded as-is to
+    // the agent loop where it becomes `ContentBlock::Image` blocks on
+    // the inbound user message.
+    let images: Option<Vec<(String, String)>> = body.images.as_ref().map(|imgs| {
+        imgs.iter()
+            .map(|i| (i.base64.clone(), i.mime.clone()))
+            .filter(|(b, m)| !b.is_empty() && !m.is_empty())
+            .collect()
+    });
     let result = super::send_and_store_response(
         state.clone(),
         super::SendRequest {
@@ -179,6 +192,7 @@ pub(super) async fn api_a2a_message(
             sender_name: Some(sender_name),
             message,
             allowed_tools,
+            images,
         },
     )
     .await?;

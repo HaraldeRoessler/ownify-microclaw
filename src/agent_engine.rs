@@ -95,15 +95,14 @@ pub trait AgentEngine: Send + Sync {
         state: &AppState,
         context: AgentRequestContext<'_>,
         override_prompt: Option<&str>,
-        image_data: Option<(String, String)>,
+        image_data: Option<Vec<(String, String)>>,
     ) -> anyhow::Result<String>;
-
     async fn process_with_events(
         &self,
         state: &AppState,
         context: AgentRequestContext<'_>,
         override_prompt: Option<&str>,
-        image_data: Option<(String, String)>,
+        image_data: Option<Vec<(String, String)>>,
         event_tx: Option<&UnboundedSender<AgentEvent>>,
     ) -> anyhow::Result<String>;
 }
@@ -117,7 +116,7 @@ impl AgentEngine for DefaultAgentEngine {
         state: &AppState,
         context: AgentRequestContext<'_>,
         override_prompt: Option<&str>,
-        image_data: Option<(String, String)>,
+        image_data: Option<Vec<(String, String)>>,
     ) -> anyhow::Result<String> {
         self.process_with_events(state, context, override_prompt, image_data, None)
             .await
@@ -128,7 +127,7 @@ impl AgentEngine for DefaultAgentEngine {
         state: &AppState,
         context: AgentRequestContext<'_>,
         override_prompt: Option<&str>,
-        image_data: Option<(String, String)>,
+        image_data: Option<Vec<(String, String)>>,
         event_tx: Option<&UnboundedSender<AgentEvent>>,
     ) -> anyhow::Result<String> {
         process_with_agent_impl(state, context, override_prompt, image_data, event_tx).await
@@ -139,7 +138,7 @@ pub async fn process_with_agent(
     state: &AppState,
     context: AgentRequestContext<'_>,
     override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
 ) -> anyhow::Result<String> {
     process_with_agent_with_events(state, context, override_prompt, image_data, None).await
 }
@@ -148,7 +147,7 @@ pub async fn process_with_agent_with_events(
     state: &AppState,
     context: AgentRequestContext<'_>,
     override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
     event_tx: Option<&UnboundedSender<AgentEvent>>,
 ) -> anyhow::Result<String> {
     process_with_agent_with_events_guarded(
@@ -166,7 +165,7 @@ pub async fn process_with_agent_with_events_guarded(
     state: &AppState,
     context: AgentRequestContext<'_>,
     override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
     event_tx: Option<&UnboundedSender<AgentEvent>>,
     turn_guard: Option<crate::chat_turn_queue::TurnGuard>,
 ) -> anyhow::Result<String> {
@@ -561,7 +560,7 @@ pub(crate) async fn process_with_agent_impl(
     state: &AppState,
     context: AgentRequestContext<'_>,
     override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
     event_tx: Option<&UnboundedSender<AgentEvent>>,
 ) -> anyhow::Result<String> {
     let trace_id = new_trace_id();
@@ -655,7 +654,7 @@ async fn process_with_agent_logic(
     state: &AppState,
     context: AgentRequestContext<'_>,
     override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
     event_tx: Option<&UnboundedSender<AgentEvent>>,
     metrics: &mut AgentMetrics,
     trace_id: &[u8],
@@ -918,25 +917,37 @@ async fn process_with_agent_logic(
         "System prompt constructed"
     );
 
-    // If image_data is present, convert the last user message to a blocks-based message with the image
-    if let Some((base64_data, media_type)) = image_data {
-        if let Some(last_msg) = messages.last_mut() {
-            if last_msg.role == "user" {
-                let text_content = match &last_msg.content {
-                    MessageContent::Text(t) => t.clone(),
-                    _ => String::new(),
-                };
-                let mut blocks = vec![ContentBlock::Image {
-                    source: ImageSource {
-                        source_type: "base64".into(),
-                        media_type,
-                        data: base64_data,
-                    },
-                }];
-                if !text_content.is_empty() {
-                    blocks.push(ContentBlock::Text { text: text_content });
+    // If image_data is present, convert the last user message to a
+    // blocks-based message with one Image block per attachment, in
+    // order, followed by the text. The OpenAI multimodal content
+    // shape is [text, image_url, image_url, ...] (text usually
+    // first, but the LLM layer at src/llm.rs is tolerant of either
+    // order). Mirrors the Matrix channel handler at
+    // src/channels/matrix.rs which builds a Vec<ImageSource> and
+    // hands it to the LLM.
+    if let Some(images) = image_data {
+        if !images.is_empty() {
+            if let Some(last_msg) = messages.last_mut() {
+                if last_msg.role == "user" {
+                    let text_content = match &last_msg.content {
+                        MessageContent::Text(t) => t.clone(),
+                        _ => String::new(),
+                    };
+                    let mut blocks: Vec<ContentBlock> = images
+                        .into_iter()
+                        .map(|(base64_data, media_type)| ContentBlock::Image {
+                            source: ImageSource {
+                                source_type: "base64".into(),
+                                media_type,
+                                data: base64_data,
+                            },
+                        })
+                        .collect();
+                    if !text_content.is_empty() {
+                        blocks.push(ContentBlock::Text { text: text_content });
+                    }
+                    last_msg.content = MessageContent::Blocks(blocks);
                 }
-                last_msg.content = MessageContent::Blocks(blocks);
             }
         }
     }
@@ -2359,7 +2370,6 @@ Built-in execution playbook:
             prompt.push_str(ctx);
             prompt.push_str("\n</project_context>\n");
         }
-    }
     }
 
     if !memory_context.is_empty() {
@@ -4150,10 +4160,6 @@ mod tests {
     #[test]
     fn test_append_plugin_context_sections_splits_prompt_and_documents() {
         let mut prompt = super::build_system_prompt("testbot", "web", "", 1, "", "UTC", None, &[], None, None);
-=======
-        let mut prompt =
-            super::build_system_prompt("testbot", "web", "", 1, "", "UTC", None, None, None);
->>>>>>> upstream/main
         let injections = vec![
             crate::plugins::PluginContextInjection {
                 plugin_name: "p1".to_string(),

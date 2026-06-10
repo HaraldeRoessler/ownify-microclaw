@@ -773,6 +773,15 @@ struct SendRequest {
     /// compile time.
     #[serde(skip_deserializing, default)]
     allowed_tools: Option<Vec<String>>,
+    /// Optional inbound image attachments, each as a (base64, mime)
+    /// tuple. Populated by the A2A inbound path when the
+    /// `A2AMessageRequest.images` field is set. Translated into
+    /// `ContentBlock::Image` blocks on the user message so the LLM
+    /// layer (which already handles image content blocks via
+    /// `translate_messages_to_oai`) sees them as proper vision
+    /// inputs. Empty/None means no images — same as before.
+    #[serde(skip_deserializing, default)]
+    images: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1648,6 +1657,7 @@ async fn api_hook_agent(
         sender_name: body.sender_name.or(body.name),
         message: body.message,
         allowed_tools: None,
+        images: None,
     };
     stream::start_stream_run_with_actor(state, send, "hook:token".to_string(), "/hooks/agent").await
 }
@@ -1700,6 +1710,7 @@ async fn api_hook_wake(
         sender_name: Some(sender_name),
         message,
         allowed_tools: None,
+        images: None,
     };
     stream::start_stream_run_with_actor(state, send, "hook:token".to_string(), "/hooks/wake").await
 }
@@ -1832,7 +1843,7 @@ async fn send_and_store_response_with_events(
         }
     });
     let response =
-        process_with_agent_with_events(&state.app_state, request_ctx, None, None, Some(&tx))
+        process_with_agent_with_events(&state.app_state, request_ctx, None, body.images.clone(), Some(&tx))
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     drop(tx);

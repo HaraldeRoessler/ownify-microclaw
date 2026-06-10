@@ -859,6 +859,7 @@ async fn handle_request_frame(
                 sender_name: Some("ws-user".to_string()),
                 message: params.message,
                 allowed_tools: None,
+                images: None,
             };
             let resp = match stream::start_stream_run_with_actor(
                 state.clone(),
@@ -1083,6 +1084,7 @@ async fn handle_request_frame(
                 sender_name: Some("ws-user".to_string()),
                 message,
                 allowed_tools: None,
+                images: None,
             };
             let resp = match stream::start_stream_run_with_actor(
                 state.clone(),
@@ -1228,6 +1230,7 @@ async fn handle_request_frame(
                 sender_name: Some("ws-user".to_string()),
                 message: params.task,
                 allowed_tools: None,
+                images: None,
             };
             let resp = match stream::start_stream_run_with_actor(
                 state.clone(),

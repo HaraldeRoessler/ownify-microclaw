@@ -2587,7 +2587,7 @@ async fn handle_feishu_message(
     };
 
     let mut text = text.to_string();
-    let mut image_data: Option<(String, String)> = None;
+    let mut image_data: Option<Vec<(String, String)>> = None;
 
     match message_type {
         "image" => {
@@ -2605,7 +2605,7 @@ async fn handle_feishu_message(
                     {
                         Ok(bytes) => {
                             let media_type = guess_image_media_type(&bytes);
-                            image_data = Some((base64_encode(&bytes), media_type));
+                            image_data = Some(vec![(base64_encode(&bytes), media_type)]);
                             if text.trim().is_empty() || text.trim().starts_with('{') {
                                 text = "[image]".to_string();
                             }

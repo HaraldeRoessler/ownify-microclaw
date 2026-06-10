@@ -452,7 +452,7 @@ enum MatrixIncomingEvent {
         mentioned_bot: bool,
         event_time_ms: Option<i64>,
         // See MatrixIncomingMessage.image_data.
-        image_data: Option<(String, String)>,
+        image_data: Option<Vec<(String, String)>>,
     },
     Reaction {
         room_id: String,
@@ -859,7 +859,7 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
             // to the agent as a vision input. Without this step the LLM
             // only sees the filename text body, so it either hallucinates
             // contents or correctly refuses to describe what it can't see.
-            let image_data: Option<(String, String)> = if let MessageType::Image(image_content) = &ev.content.msgtype {
+            let image_data: Option<Vec<(String, String)>> = if let MessageType::Image(image_content) = &ev.content.msgtype {
                 let client = room.client();
                 // matrix-sdk's get_file takes the full MessageEventContent
                 // (which impls MediaEventContent) and returns Option<Vec<u8>>
@@ -874,7 +874,7 @@ async fn start_matrix_e2ee_sync(app_state: Arc<AppState>, runtime: MatrixRuntime
                             .and_then(|i| i.mimetype.as_deref())
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| guess_image_media_type_from_bytes(&bytes));
-                        Some((b64, mime))
+                        Some(vec![(b64, mime)])
                     }
                     Ok(None) => {
                         warn!("Matrix image event had no downloadable media source");
@@ -1979,7 +1979,7 @@ struct MatrixIncomingMessage {
     /// we stash (base64_bytes, mime_type) here. Passed through to the
     /// agent engine as vision input so the LLM can actually see the
     /// pixels instead of just the filename.
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
     /// For `m.file` / `m.audio` / `m.video` events. Bytes are saved
     /// into the chat workspace so that bash / read_file / file-format
     /// skills (pptx, xlsx, pdf, docx) can operate on the actual file

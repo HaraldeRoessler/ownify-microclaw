@@ -224,7 +224,7 @@ pub(crate) async fn maybe_handle_explicit_memory_command(
     state: &AppState,
     chat_id: i64,
     override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
+    image_data: Option<Vec<(String, String)>>,
 ) -> Result<Option<String>> {
     if override_prompt.is_some() || image_data.is_some() {
         return Ok(None);

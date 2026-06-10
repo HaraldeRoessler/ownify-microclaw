@@ -757,7 +757,7 @@ async fn download_first_slack_image(
     bot_token: &str,
     files: &[serde_json::Value],
     max_bytes: u64,
-) -> Option<(String, String)> {
+) -> Option<Vec<(String, String)>> {
     for file in files {
         let mimetype = file.get("mimetype").and_then(|v| v.as_str()).unwrap_or("");
         if !mimetype.starts_with("image/") {
@@ -800,7 +800,7 @@ async fn download_first_slack_image(
                         use base64::Engine;
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                         let media_type = guess_slack_image_media_type(&bytes, mimetype);
-                        return Some((b64, media_type));
+                        return Some(vec![(b64, media_type)]);
                     }
                     Err(e) => {
                         warn!("Slack: failed to read image bytes: {e}");

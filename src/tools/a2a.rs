@@ -173,6 +173,12 @@ impl Tool for A2ASendTool {
             source_agent: Some(crate::a2a::local_agent_name(&self.config)),
             source_url: self.config.a2a.public_base_url.clone(),
             message: sanitized,
+            // Outbound peer calls don't carry image attachments — this
+            // tool sends text-only task delegations. Inbound agents
+            // that receive an `images` field from a peer will consume
+            // it the same way they consume the field from the
+            // ownify-control-plane / a2a-gateway path.
+            images: None,
         };
 
         let mut request = self

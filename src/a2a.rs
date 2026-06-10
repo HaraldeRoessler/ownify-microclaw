@@ -41,6 +41,35 @@ pub struct A2AMessageRequest {
     #[serde(default)]
     pub source_url: Option<String>,
     pub message: String,
+    /// Optional inbound image attachments. Each is a (base64, mime) pair
+    /// the agent should treat as vision input, identical to how Matrix
+    /// channel's m.image handler at `src/channels/matrix.rs` already
+    /// builds `image_data` for the agent loop. Used by the agent-api
+    /// path (opencode / librechat / langchain) so attachments from
+    /// those clients reach the LLM as proper vision content blocks
+    /// instead of being dropped at the protocol boundary.
+    ///
+    /// Backwards compatible: callers that don't send `images` (every
+    /// existing peer including other ownify-microclaw instances) are
+    /// unaffected. `None` and an empty Vec behave identically.
+    #[serde(default)]
+    pub images: Option<Vec<InboundImage>>,
+}
+
+/// One inbound image attachment in an A2A message. Carries the
+/// base64-encoded bytes plus a MIME type (e.g. "image/jpeg",
+/// "image/png") so the receiver can rebuild the OpenAI `image_url`
+/// content-block shape the LLM layer already understands.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboundImage {
+    /// Base64-encoded image bytes. The wire form is whatever the
+    /// caller sends; the agent-api translates HTTP(S) data: URIs
+    /// before this so the microclaw side always sees raw base64.
+    pub base64: String,
+    /// MIME type, e.g. "image/jpeg", "image/png", "image/webp",
+    /// "image/gif". Used verbatim as the `media_type` on the
+    /// `ImageSource` that goes into the LLM request.
+    pub mime: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

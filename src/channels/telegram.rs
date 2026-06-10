@@ -591,7 +591,7 @@ async fn handle_message(
 
     // Extract content: text, photo, or voice
     let mut text = msg.text().unwrap_or("").to_string();
-    let mut image_data: Option<(String, String)> = None; // (base64, media_type)
+    let mut image_data: Option<Vec<(String, String)>> = None; // (base64, media_type)
     let mut document_saved_path: Option<String> = None;
 
     let (mentioned, text_mentions_bot, replied_to_bot, should_respond) = match runtime_chat_type {
@@ -703,7 +703,7 @@ async fn handle_message(
                 Ok(bytes) => {
                     let base64 = base64_encode(&bytes);
                     let media_type = guess_image_media_type(&bytes);
-                    image_data = Some((base64, media_type));
+                    image_data = Some(vec![(base64, media_type)]);
                 }
                 Err(e) => {
                     error!("Failed to download photo: {e}");
