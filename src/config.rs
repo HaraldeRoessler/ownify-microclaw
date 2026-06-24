@@ -223,6 +223,9 @@ fn default_max_session_messages() -> usize {
 fn default_compact_keep_recent() -> usize {
     20
 }
+fn default_compact_token_threshold_pct() -> usize {
+    80
+}
 fn default_tool_timeout_secs() -> u64 {
     30
 }
@@ -1244,6 +1247,18 @@ pub struct Config {
     pub max_session_messages: usize,
     #[serde(default = "default_compact_keep_recent")]
     pub compact_keep_recent: usize,
+    /// Mid-loop compaction: re-check message count after each tool call
+    /// within a single request and compact if exceeded. Prevents context
+    /// from growing unboundedly during multi-iteration tool calls (e.g.,
+    /// 12 read_file calls in one request). Default: true.
+    #[serde(default = "default_true")]
+    pub enable_mid_loop_compaction: bool,
+    /// Token-aware compaction: estimate total tokens in messages (chars/4
+    /// heuristic) and compact if the estimate exceeds this percentage of
+    /// max_tokens. Set to 0 to disable token-aware compaction (fall back
+    /// to message-count-only). Default: 80 (compact at 80% of max_tokens).
+    #[serde(default = "default_compact_token_threshold_pct")]
+    pub compact_token_threshold_pct: usize,
     #[serde(default = "default_tool_timeout_secs")]
     pub default_tool_timeout_secs: u64,
     #[serde(default)]

@@ -15,6 +15,7 @@ use crate::post_retrieval_planner::{self, PostRetrievalPlanner};
 use crate::run_control;
 use crate::runtime::AppState;
 use crate::tools::ToolAuthContext;
+use crate::verifier::{self, call_verifier};
 use microclaw_core::llm_types::{
     ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock,
 };
@@ -957,8 +958,13 @@ async fn process_with_agent_logic(
         return Ok("I didn't receive any message to process.".into());
     }
 
-    // Compact if messages exceed threshold
-    if messages.len() > state.config.max_session_messages {
+    // Compact if messages exceed threshold (message count OR token estimate)
+    if should_compact(
+        &messages,
+        state.config.max_session_messages,
+        state.config.max_tokens,
+        state.config.compact_token_threshold_pct,
+    ) {
         let msg_count_before = messages.len();
         archive_conversation(
             &state.config.data_dir,
@@ -1033,6 +1039,11 @@ async fn process_with_agent_logic(
     let mut seen_failed_tool_details: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut empty_visible_reply_retry_attempted = false;
+    // Set when the verifier self-check returned fail and we injected
+    // a reformulation prompt. Caps the verifier retry at 1 — if the
+    // LLM fails verification twice, the second attempt is delivered
+    // with the verifier's stamp so the user sees the issue.
+    let mut verifier_retry_attempted = false;
     let (effective_profile, effective_model, _session_settings) =
         resolve_effective_provider_and_model(state, context.caller_channel, chat_id).await;
     metrics.model = effective_model.clone();
@@ -1393,7 +1404,7 @@ async fn process_with_agent_logic(
             // Always compute visible text without thinking tags for retry/fallback decisions.
             let visible_text = strip_thinking(&text);
             // Keep raw thinking text only when show_thinking is enabled.
-            let display_text = if effective_profile.show_thinking {
+            let mut display_text = if effective_profile.show_thinking {
                 text.clone()
             } else {
                 visible_text.clone()
@@ -1417,6 +1428,92 @@ async fn process_with_agent_logic(
                     ),
                 });
                 continue;
+            }
+
+            // --- Verifier self-check (sprint 2026-06-11) ---
+            //
+            // If the LLM's reply contains a "## Provenance" block (it
+            // should — that's mandatory in the SOUL.md for any reply
+            // that quotes peer positions, external data, or claims a
+            // memory write), we send the reply to the in-cluster
+            // verifier (the per-tenant a2a-gateway) and check the
+            // verdict. The verifier cross-references the LLM's claims
+            // against a2a_interactions (peer calls) and memgate
+            // (memory writes) — ground truth the LLM can't fake.
+            //
+            // Three outcomes:
+            //   pass  → deliver the reply as-is.
+            //   warn  → prepend suggested_reply_prefix and deliver.
+            //   fail  → inject a reformulation prompt and continue
+            //           the loop. Capped at one retry so a determined
+            //           LLM doesn't loop forever — if it fails twice
+            //           we deliver the second attempt with a stamp.
+            //
+            // Replies that DON'T contain a Provenance block skip the
+            // verifier entirely (no claims to verify). This keeps
+            // simple Q&A turns fast (~200ms verifier call per turn
+            // that uses Provenance is the cost).
+            if has_displayable_output && !verifier_retry_attempted
+                && display_text.contains("## Provenance")
+                && std::env::var("OWNIFY_A2A_OUTBOUND_TOKEN").is_ok()
+            {
+                match call_verifier(&display_text, &state).await {
+                    Ok(verifier::VerifierOutcome::Pass) => {
+                        debug!(chat_id, "verifier: pass");
+                    }
+                    Ok(verifier::VerifierOutcome::Warn { reason, suggested_prefix }) => {
+                        warn!(
+                            chat_id,
+                            reason = %reason,
+                            "verifier: warn — prepending stamp"
+                        );
+                        // Splice the stamp onto the front of display_text.
+                        // The text we return becomes the user-facing
+                        // message; we keep the raw text in the session
+                        // for the LLM's next turn.
+                        let stamp = suggested_prefix.unwrap_or_else(|| {
+                            format!("⚠️ unverifiable: {reason}.")
+                        });
+                        display_text = format!("{stamp}\n\n{display_text}");
+                    }
+                    Ok(verifier::VerifierOutcome::Fail { reason, suggested_prefix }) => {
+                        warn!(
+                            chat_id,
+                            reason = %reason,
+                            "verifier: fail — reformulating"
+                        );
+                        verifier_retry_attempted = true;
+                        let stamp = suggested_prefix.unwrap_or_else(|| {
+                            format!("⛔ verifier failed: {reason}.")
+                        });
+                        messages.push(Message {
+                            role: "assistant".into(),
+                            content: MessageContent::Text(text.clone()),
+                        });
+                        messages.push(Message {
+                            role: "user".into(),
+                            content: MessageContent::Text(format!(
+                                "[verifier_failed]: {stamp} Reformulate your reply now. \
+                                 Either (a) drop the unverified claims and replace with what you \
+                                 actually did, (b) escalate to the user that you cannot complete \
+                                 the task, or (c) do the missing research first and reply with \
+                                 real Provenance. Do NOT repeat the same reply."
+                            )),
+                        });
+                        continue;
+                    }
+                    Err(err) => {
+                        // Verifier unreachable — log and deliver. We
+                        // don't want a verifier outage to block all
+                        // agent replies; the user can still flag
+                        // fabrications manually.
+                        warn!(
+                            chat_id,
+                            err = %err,
+                            "verifier: unreachable — delivering without check"
+                        );
+                    }
+                }
             }
 
             // --- Mid-turn injection at end_turn ---
@@ -1803,6 +1900,45 @@ async fn process_with_agent_logic(
                 role: "user".into(),
                 content: MessageContent::Blocks(tool_results),
             });
+
+            // Mid-loop compaction: re-check after each tool call batch.
+            // Without this, 12 read_file calls in one request grow context
+            // unboundedly until the next request triggers compaction.
+            if state.config.enable_mid_loop_compaction
+                && should_compact(
+                    &messages,
+                    state.config.max_session_messages,
+                    state.config.max_tokens,
+                    state.config.compact_token_threshold_pct,
+                )
+            {
+                let msg_count_before = messages.len();
+                let est_tokens_before = estimate_message_tokens(&messages);
+                archive_conversation(
+                    &state.config.data_dir,
+                    context.caller_channel,
+                    chat_id,
+                    &messages,
+                );
+                messages = compact_messages(
+                    state,
+                    context.caller_channel,
+                    chat_id,
+                    &messages,
+                    state.config.compact_keep_recent,
+                )
+                .await;
+                let est_tokens_after = estimate_message_tokens(&messages);
+                info!(
+                    chat_id,
+                    messages_before = msg_count_before,
+                    messages_after = messages.len(),
+                    est_tokens_before,
+                    est_tokens_after,
+                    "Mid-loop context compacted"
+                );
+            }
+
             if batch_ctx.waiting_for_user_approval {
                 persist_session_with_skill_env_files(
                     state,
@@ -2527,6 +2663,57 @@ pub(crate) fn strip_thinking(text: &str) -> String {
     let no_thinking = strip_tag_blocks(&no_thought, "<thinking>", "</thinking>");
     let no_reasoning = strip_tag_blocks(&no_thinking, "<reasoning>", "</reasoning>");
     no_reasoning.trim().to_string()
+}
+
+/// Rough token estimation: ~4 chars per token (same heuristic as memory_service).
+/// Used for token-aware compaction triggers.
+fn estimate_message_tokens(messages: &[Message]) -> usize {
+    let mut total_chars = 0;
+    for msg in messages {
+        match &msg.content {
+            MessageContent::Text(t) => total_chars += t.len(),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => total_chars += text.len(),
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            total_chars += name.len();
+                            total_chars += input.to_string().len();
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            total_chars += content.len();
+                        }
+                        ContentBlock::Image { .. } => total_chars += 258, // rough image token cost
+                    }
+                }
+            }
+        }
+        total_chars += 4; // role overhead
+    }
+    (total_chars + 3) / 4 // chars → tokens
+}
+
+/// Check if compaction should trigger based on both message count AND
+/// estimated token count. Returns true if either threshold is exceeded.
+fn should_compact(
+    messages: &[Message],
+    max_session_messages: usize,
+    max_tokens: u32,
+    compact_token_threshold_pct: usize,
+) -> bool {
+    // Message-count check (original behavior)
+    if messages.len() > max_session_messages {
+        return true;
+    }
+    // Token-aware check: compact if estimated tokens exceed threshold% of max_tokens
+    if compact_token_threshold_pct > 0 && max_tokens > 0 {
+        let threshold = (max_tokens as usize) * compact_token_threshold_pct / 100;
+        let estimated = estimate_message_tokens(messages);
+        if estimated > threshold {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extract text content from a Message for summarization/display.
