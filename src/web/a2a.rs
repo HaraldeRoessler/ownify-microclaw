@@ -149,12 +149,29 @@ pub(super) async fn api_a2a_message(
     if message.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "message is required".into()));
     }
+    // Session key: prefer explicit session_key from body, then caller DID
+    // from x-ownify-caller-did header (per-caller isolation), then
+    // source_agent, then fallback to "a2a:remote".
+    //
+    // The caller DID isolation ensures that A2A requests from different
+    // callers (different tenants/customers) get separate conversation
+    // sessions — no context bleeding between customers. The gateway
+    // sets x-ownify-caller-did from the AAE envelope's `iss` field.
     let session_key = body
         .session_key
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            // Try x-ownify-caller-did header for per-caller isolation
+            headers
+                .get("x-ownify-caller-did")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.starts_with("did:"))
+                .map(|did| format!("a2a:{did}"))
+        })
         .unwrap_or_else(|| default_session_key_for_source(body.source_agent.as_deref()));
     let sender_name = body
         .sender_name
