@@ -157,6 +157,13 @@ pub(super) async fn api_a2a_message(
     // callers (different tenants/customers) get separate conversation
     // sessions — no context bleeding between customers. The gateway
     // sets x-ownify-caller-did from the AAE envelope's `iss` field.
+    let caller_did: Option<String> = headers
+        .get("x-ownify-caller-did")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.starts_with("did:"))
+        .map(|v| v.to_string());
+
     let session_key = body
         .session_key
         .as_deref()
@@ -164,15 +171,24 @@ pub(super) async fn api_a2a_message(
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
         .or_else(|| {
-            // Try x-ownify-caller-did header for per-caller isolation
-            headers
-                .get("x-ownify-caller-did")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim)
-                .filter(|v| !v.is_empty() && v.starts_with("did:"))
-                .map(|did| format!("a2a:{did}"))
+            // Use caller DID for per-caller session isolation
+            caller_did.as_ref().map(|did| format!("a2a:{did}"))
         })
         .unwrap_or_else(|| default_session_key_for_source(body.source_agent.as_deref()));
+
+    // Enrich the message with the caller's DID so the LLM (and thus
+    // the Support Agent) knows WHO is asking. The prefix
+    // "[A2A from: did:...]" is visible to the LLM but not to the
+    // end customer (they see the agent's response, not the input).
+    // This allows the agent to:
+    // - Identify which customer is asking
+    // - Store diary entries with the caller DID as a tag
+    // - Report to admin: "Customer X asked Y"
+    let message = if let Some(ref did) = caller_did {
+        format!("[A2A from: {}] {}", did, message)
+    } else {
+        message
+    };
     let sender_name = body
         .sender_name
         .as_deref()
