@@ -53,6 +53,8 @@ pub mod tls;
 pub mod tool_executor;
 pub mod tool_guardrails;
 pub mod tools;
+pub mod trust;
+pub mod verifier;
 pub mod voice;
 pub mod web;
 
