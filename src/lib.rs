@@ -46,6 +46,7 @@ pub mod setup;
 pub mod setup_def;
 pub mod skill_audit;
 pub mod skill_review;
+pub mod skill_verifier;
 pub mod skills;
 pub mod subdirectory_hints;
 pub mod title_generator;
