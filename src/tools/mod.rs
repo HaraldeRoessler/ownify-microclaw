@@ -2,6 +2,7 @@ pub mod a2a;
 pub mod activate_skill;
 pub mod bash;
 pub mod browser;
+pub mod check_delegation;
 pub mod clarify;
 pub mod consult_specialist;
 pub mod describe_image;
@@ -15,8 +16,10 @@ pub mod grep;
 pub mod image_gen;
 pub mod insights;
 pub mod knowledge_graph;
+pub mod log_compliance_action;
 pub mod mcp;
 pub mod memory;
+pub mod present_credential;
 pub mod pptx_edit;
 pub mod osv_check;
 pub mod read_file;
@@ -32,6 +35,7 @@ pub mod sync_skills;
 pub mod text_to_speech;
 pub mod time_math;
 pub mod todo;
+pub mod verify_credential;
 pub mod voice;
 pub mod transcribe_audio;
 pub mod web_fetch;
@@ -218,6 +222,10 @@ impl ToolRegistry {
             Box::new(a2a::A2ASendTool::new(config)),
             Box::new(a2a::A2ATaskDelegateTool::new(config)),
             Box::new(a2a::A2ATaskStatusTool::new(config)),
+            Box::new(present_credential::PresentCredentialTool::new(config)),
+            Box::new(verify_credential::VerifyCredentialTool::new()),
+            Box::new(log_compliance_action::LogComplianceActionTool::new(config, db.clone())),
+            Box::new(check_delegation::CheckDelegationTool::new()),
             Box::new(schedule::ScheduleTaskTool::new(
                 channel_registry.clone(),
                 db.clone(),

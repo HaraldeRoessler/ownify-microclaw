@@ -3231,6 +3231,61 @@ impl Database {
         Ok(rows)
     }
 
+    // --- Compliance audit (EU AI Act Article 12 hash-chained trail) ---
+
+    /// Ensure the `compliance_audit` table exists. Idempotent.
+    pub fn ensure_compliance_audit_table(&self) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS compliance_audit (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                article TEXT,
+                agent_did TEXT
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Get the `payload_hash` of the last compliance_audit entry, or
+    /// `"genesis"` if the table is empty.
+    pub fn get_last_compliance_hash(&self) -> Result<String, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn.query_row(
+            "SELECT payload_hash FROM compliance_audit ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(hash) => Ok(hash),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok("genesis".to_string()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Insert a new compliance_audit entry and return its `seq`.
+    pub fn insert_compliance_audit(
+        &self,
+        action: &str,
+        payload_hash: &str,
+        prev_hash: &str,
+        timestamp: &str,
+        article: &str,
+        agent_did: Option<&str>,
+    ) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO compliance_audit (action, payload_hash, prev_hash, timestamp, article, agent_did)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![action, payload_hash, prev_hash, timestamp, article, agent_did],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
     // --- Metrics history ---
 
     pub fn upsert_metrics_history(
