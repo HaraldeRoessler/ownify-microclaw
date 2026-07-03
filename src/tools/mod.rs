@@ -36,6 +36,7 @@ pub mod text_to_speech;
 pub mod time_math;
 pub mod todo;
 pub mod verify_credential;
+pub mod verify_skill;
 pub mod voice;
 pub mod transcribe_audio;
 pub mod web_fetch;
@@ -355,6 +356,7 @@ impl ToolRegistry {
             Box::new(transcribe_audio::TranscribeAudioTool::new(config)),
             Box::new(insights::InsightsTool::new(db.clone())),
             Box::new(fetch_artifact::FetchArtifactTool::new(db.clone())),
+            Box::new(verify_skill::VerifySkillTool::new(config)),
         ];
 
         // Add ClawHub tools if enabled
