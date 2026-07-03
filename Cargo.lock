@@ -2861,6 +2861,7 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "prost",
  "qrcode",
+ "rand 0.8.6",
  "ratatui",
  "regex",
  "reqwest 0.12.28",
