@@ -3286,6 +3286,20 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Count the number of rows in the `compliance_audit` table.
+    /// Used by the verifier to check Article 12 compliance claims
+    /// (an empty audit trail means the agent is NOT Article 12
+    /// compliant, regardless of what the LLM claims).
+    pub fn count_compliance_audit_entries(&self) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM compliance_audit",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     // --- Metrics history ---
 
     pub fn upsert_metrics_history(
