@@ -187,7 +187,14 @@ impl SkillManager {
             .collect()
     }
 
-    fn discover_skill_statuses(&self) -> Vec<SkillAvailability> {
+    pub fn discover_skill_statuses(&self) -> Vec<SkillAvailability> {
+        self.discover_skill_statuses_with_verification(None)
+    }
+
+    pub fn discover_skill_statuses_with_verification(
+        &self,
+        trust_config: Option<&crate::config::TrustConfig>,
+    ) -> Vec<SkillAvailability> {
         let mut statuses = Vec::new();
         let state = self.read_state_file();
         let entries = match std::fs::read_dir(&self.skills_dir) {
@@ -227,6 +234,49 @@ impl SkillManager {
                             reason: Some(reason),
                         }),
                     };
+                }
+            }
+        }
+
+        // --- Skill registry verification (Phase 8) ---
+        if let Some(tc) = trust_config {
+            if let Some(ref registry_url) = tc.skill_registry_url {
+                let require_verified = tc.require_verified_skills;
+                use crate::skill_verifier::{verify_skill_file, should_load_skill, SkillVerdict};
+
+                for status in &mut statuses {
+                    let skill_md_path = status.meta.dir_path.join("SKILL.md");
+                    if !skill_md_path.exists() {
+                        continue;
+                    }
+
+                    let result = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(
+                            verify_skill_file(&skill_md_path, registry_url)
+                        )
+                    });
+
+                    let should_load = should_load_skill(&result, require_verified);
+
+                    if !should_load {
+                        status.available = false;
+                        status.reason = Some(match result.verdict {
+                            SkillVerdict::AtrBlocked => format!("ATR blocked (score: {:?})", result.score),
+                            SkillVerdict::MtFailed => "MolTrust audit failed (score < 70)".into(),
+                            SkillVerdict::NotFound if require_verified => "Not in skill registry — require_verified_skills is true".into(),
+                            SkillVerdict::Audited if require_verified => "Audited but no credential — require_verified_skills is true".into(),
+                            SkillVerdict::Expired if require_verified => "Credential expired — require_verified_skills is true".into(),
+                            _ => "Failed skill verification".into(),
+                        });
+                    }
+
+                    tracing::info!(
+                        skill = %status.meta.name,
+                        verdict = ?result.verdict,
+                        score = ?result.score,
+                        loaded = should_load,
+                        "skill verification result"
+                    );
                 }
             }
         }
