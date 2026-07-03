@@ -4196,6 +4196,7 @@ mod tests {
             "",
             "UTC",
             None,
+            &[],
             Some(ctx),
             None,
         );
@@ -4217,6 +4218,7 @@ mod tests {
             "",
             "UTC",
             None,
+            &[],
             None,
             Some(user_model),
         );
