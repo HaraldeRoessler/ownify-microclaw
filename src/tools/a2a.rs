@@ -162,11 +162,45 @@ impl Tool for A2ASendTool {
             .map(ToOwned::to_owned)
             .or_else(|| peer.default_session_key.clone())
             .unwrap_or_else(|| format!("a2a:{}", peer_name));
+        // Sprint 2026-06-11: bump a2a_send default to 300s. Peer replies
+        // are real LLM turns; cold cache + reasoning-model classification
+        // + multi-step sub-tool work + structured reply formatting can
+        // run 60-270s on the deepest paths (CFO measured 270s on
+        // reasoning-routed inbound). 30s killed peers mid-reply and
+        // produced half-finished drafts. 300s is the measured ceiling +
+        // ~10% headroom. Callers can still override per-invocation via
+        // `timeout_secs` if they want to fail fast.
+        const DEFAULT_A2A_SEND_TIMEOUT_SECS: u64 = 300;
         let timeout_secs = input
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| self.config.tool_timeout_secs(self.name(), 60));
+            .unwrap_or_else(|| {
+                self.config
+                    .tool_timeout_secs(self.name(), DEFAULT_A2A_SEND_TIMEOUT_SECS)
+                    .max(DEFAULT_A2A_SEND_TIMEOUT_SECS)
+            });
         let sanitized = sanitize_for_json(message);
+
+        // Trust auto-attach: if trust.auto_present is true, attach the
+        // agent's DID + compliance VC to every outbound A2A message so
+        // receivers can verify identity and compliance status.
+        let (sender_did, sender_moltrust_did, sender_credential) = if self.config.trust.auto_present {
+            let did = self.config.trust.ownify_did.clone();
+            let moltrust_did = self.config.trust.moltrust_did.clone();
+            let vc = self.config.trust.compliance_vc_path.as_ref().and_then(|vc_path| {
+                if std::path::Path::new(vc_path).exists() {
+                    std::fs::read_to_string(vc_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                } else {
+                    None
+                }
+            });
+            (did, moltrust_did, vc)
+        } else {
+            (None, None, None)
+        };
+
         let body = A2AMessageRequest {
             session_key: Some(session_key.clone()),
             sender_name: None,
@@ -179,6 +213,9 @@ impl Tool for A2ASendTool {
             // it the same way they consume the field from the
             // ownify-control-plane / a2a-gateway path.
             images: None,
+            sender_did,
+            sender_moltrust_did,
+            sender_credential,
         };
 
         let mut request = self

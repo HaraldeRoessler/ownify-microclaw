@@ -54,6 +54,16 @@ pub struct A2AMessageRequest {
     /// unaffected. `None` and an empty Vec behave identically.
     #[serde(default)]
     pub images: Option<Vec<InboundImage>>,
+    /// Sender's DID (did:web) — attached when `trust.auto_present` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_did: Option<String>,
+    /// Sender's MolTrust DID — attached when `trust.auto_present` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_moltrust_did: Option<String>,
+    /// Sender's compliance Verifiable Credential (W3C VC JSON) — attached
+    /// when `trust.auto_present` is true and a VC file is configured and exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_credential: Option<serde_json::Value>,
 }
 
 /// One inbound image attachment in an A2A message. Carries the
