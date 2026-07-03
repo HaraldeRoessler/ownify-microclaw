@@ -1120,6 +1120,63 @@ impl Default for A2AConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrustConfig {
+    /// ownify did:web for this agent (local identity)
+    #[serde(default)]
+    pub ownify_did: Option<String>,
+    /// MolTrust DID (on-chain identity, if registered)
+    #[serde(default)]
+    pub moltrust_did: Option<String>,
+    /// Path to Ed25519 private key file (for signing outbound VCs)
+    #[serde(default)]
+    pub private_key_path: Option<String>,
+    /// Path to compliance VC JSON file (Annex V, etc.)
+    #[serde(default)]
+    pub compliance_vc_path: Option<String>,
+    /// Path to trust score cache JSON (synced from MolTrust nightly)
+    #[serde(default)]
+    pub trust_score_cache_path: Option<String>,
+    /// Auto-present DID + VC on every A2A outbound call
+    #[serde(default = "default_true")]
+    pub auto_present: bool,
+    /// Verify inbound VCs locally (true) or delegate to gateway (false)
+    #[serde(default = "default_true")]
+    pub verify_inbound_local: bool,
+    /// Log every action to compliance_audit table (Article 12)
+    #[serde(default = "default_true")]
+    pub log_compliance_actions: bool,
+    /// Skill registry URL (ownify-skill-registry service) — Phase 8
+    #[serde(default)]
+    pub skill_registry_url: Option<String>,
+    /// If true: only load skills that are "verified" in the registry
+    #[serde(default)]
+    pub require_verified_skills: bool,
+    /// Re-verify skills every N hours (cached verification)
+    #[serde(default = "default_skill_verify_interval")]
+    pub skill_verify_interval_hours: u64,
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self {
+            ownify_did: None,
+            moltrust_did: None,
+            private_key_path: None,
+            compliance_vc_path: None,
+            trust_score_cache_path: None,
+            auto_present: true,
+            verify_inbound_local: true,
+            log_compliance_actions: true,
+            skill_registry_url: None,
+            require_verified_skills: false,
+            skill_verify_interval_hours: 24,
+        }
+    }
+}
+
+fn default_skill_verify_interval() -> u64 { 24 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     // --- LLM / API ---
     #[serde(default = "default_llm_provider")]
@@ -1277,6 +1334,8 @@ pub struct Config {
     pub interjection: InterjectionConfig,
     #[serde(default)]
     pub a2a: A2AConfig,
+    #[serde(default)]
+    pub trust: TrustConfig,
 
     // --- Concurrency ---
     /// Maximum number of pending messages per chat before oldest are dropped.
