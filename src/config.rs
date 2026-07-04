@@ -1088,6 +1088,9 @@ pub struct A2APeerConfig {
     pub description: Option<String>,
     #[serde(default)]
     pub default_session_key: Option<String>,
+    /// Peer's DID (e.g. did:moltrust:xxx) — used for A2A provenance display.
+    #[serde(default)]
+    pub peer_did: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -258,15 +258,29 @@ impl Tool for A2ASendTool {
                 ))
             }
         };
+
+        // Include peer DID in the tool result so the LLM can reference it
+        // in its response to the human user. The peer's DID comes from
+        // the peer config (keyed by peer name in a2a.peers). We also
+        // include any sender_did the peer reported in its response.
+        let peer_did = peer.peer_did.as_deref().unwrap_or("unknown");
+        let response_with_provenance = format!(
+            "{}\n\n— via A2A from {} (DID: {})",
+            parsed.response.trim(),
+            parsed.agent_name.as_str(),
+            peer_did
+        );
+
         ToolResult::success(
             serde_json::to_string_pretty(&json!({
                 "peer": peer_name,
+                "peer_did": peer_did,
                 "protocol_version": parsed.protocol_version,
                 "agent_name": parsed.agent_name,
                 "session_key": parsed.session_key,
-                "response": parsed.response
+                "response": response_with_provenance
             }))
-            .unwrap_or(parsed.response),
+            .unwrap_or(response_with_provenance),
         )
     }
 
@@ -392,7 +406,16 @@ impl Tool for A2ATaskDelegateTool {
                 ))
             }
         };
-        ToolResult::success(serde_json::to_string_pretty(&parsed).unwrap_or_default())
+        // Include peer DID in the tool result for provenance
+        let peer_did = peer.peer_did.as_deref().unwrap_or("unknown");
+        ToolResult::success(
+            serde_json::to_string_pretty(&json!({
+                "peer": peer_name,
+                "peer_did": peer_did,
+                "task": parsed,
+            }))
+            .unwrap_or_default(),
+        )
     }
 }
 
