@@ -1,5 +1,5 @@
 // EU AI Act Article 50 — invisible watermark for AI-generated text.
-// Encodes "OWNIFY|agent_slug|short_hash" as zero-width Unicode characters
+// Encodes "OWNIFY|did|slug|hash" as zero-width Unicode characters
 // that are invisible to humans but machine-detectable.
 //
 // Encoding scheme:
@@ -7,8 +7,10 @@
 //   U+200C (zero-width non-joiner) = bit 1
 //   U+200D (zero-width joiner) = start/end delimiter
 //
-// Watermark format: U+200D + binary("OWNIFY|slug|hash") + U+200D
-// The hash is a short SHA-256 of the response text (first 8 hex chars).
+// Watermark format: U+200D + binary("OWNIFY|did|slug|hash") + U+200D
+// - did: agent's DID (did:moltrust:xxx or did:web:ownify.tech:agents:slug)
+// - slug: agent slug (fallback identifier)
+// - hash: short SHA-256 of the response text (first 8 hex chars)
 
 use sha2::{Digest, Sha256};
 
@@ -18,7 +20,8 @@ const ZWJ: char = '\u{200D}'; // zero-width joiner = delimiter
 
 /// Add an invisible watermark to AI-generated text.
 /// The watermark is appended at the end of the visible text.
-pub fn add_watermark(text: &str, slug: &str) -> String {
+/// `did` is the agent's DID (from TrustConfig), `slug` is the agent slug.
+pub fn add_watermark(text: &str, slug: &str, did: Option<&str>) -> String {
     if text.is_empty() {
         return text.to_string();
     }
@@ -29,8 +32,10 @@ pub fn add_watermark(text: &str, slug: &str) -> String {
     let hash_hex = format!("{:x}", hasher.finalize());
     let short_hash = &hash_hex[..8.min(hash_hex.len())];
 
-    // Build payload: OWNIFY|slug|hash
-    let payload = format!("OWNIFY|{}|{}", slug, short_hash);
+    // Build payload: OWNIFY|did|slug|hash
+    // If no DID available, use "unknown" as placeholder
+    let did_str = did.unwrap_or("unknown");
+    let payload = format!("OWNIFY|{}|{}|{}", did_str, slug, short_hash);
 
     // Convert payload to bits
     let bits: String = payload
@@ -72,9 +77,20 @@ pub fn detect_watermark(text: &str) -> Option<WatermarkResult> {
                 if let Ok(decoded) = bits_to_string(&bits) {
                     if decoded.starts_with("OWNIFY|") {
                         let parts: Vec<&str> = decoded.split('|').collect();
-                        if parts.len() >= 3 {
+                        if parts.len() >= 4 {
                             return Some(WatermarkResult {
                                 origin: parts[0].to_string(),
+                                did: parts[1].to_string(),
+                                slug: parts[2].to_string(),
+                                hash: parts[3].to_string(),
+                                raw: decoded,
+                            });
+                        }
+                        // Backward compat: old format OWNIFY|slug|hash (3 parts)
+                        if parts.len() == 3 {
+                            return Some(WatermarkResult {
+                                origin: parts[0].to_string(),
+                                did: "unknown".to_string(),
                                 slug: parts[1].to_string(),
                                 hash: parts[2].to_string(),
                                 raw: decoded,
@@ -93,7 +109,6 @@ pub fn detect_watermark(text: &str) -> Option<WatermarkResult> {
 
 /// Strip all watermarks from text.
 pub fn strip_watermark(text: &str) -> String {
-    // Remove all ZWJ...ZWJ sequences
     let mut result = String::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -138,6 +153,7 @@ fn bits_to_string(bits: &str) -> Result<String, std::string::FromUtf8Error> {
 #[derive(Debug, Clone)]
 pub struct WatermarkResult {
     pub origin: String,
+    pub did: String,
     pub slug: String,
     pub hash: String,
     pub raw: String,
@@ -148,29 +164,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_add_and_detect_watermark() {
+    fn test_add_and_detect_watermark_with_did() {
         let text = "Hello, I'm an AI agent.";
         let slug = "ownify-test-agent";
-        let watermarked = add_watermark(text, slug);
+        let did = "did:moltrust:abc123def456";
+        let watermarked = add_watermark(text, slug, Some(did));
         
         // Watermarked text should look the same to humans
-        // (zero-width chars are invisible but trim() removes them, so compare visually)
         let visible_part = strip_watermark(&watermarked);
         assert_eq!(visible_part, text);
         
-        // But should contain the watermark
+        // But should contain the watermark with DID
         let result = detect_watermark(&watermarked);
         assert!(result.is_some());
         let wm = result.unwrap();
         assert_eq!(wm.origin, "OWNIFY");
+        assert_eq!(wm.did, "did:moltrust:abc123def456");
         assert_eq!(wm.slug, "ownify-test-agent");
         assert!(!wm.hash.is_empty());
     }
 
     #[test]
+    fn test_add_watermark_without_did() {
+        let text = "Hello world";
+        let watermarked = add_watermark(text, "test", None);
+        let result = detect_watermark(&watermarked).unwrap();
+        assert_eq!(result.did, "unknown");
+        assert_eq!(result.slug, "test");
+    }
+
+    #[test]
     fn test_strip_watermark() {
         let text = "Hello world";
-        let watermarked = add_watermark(text, "test");
+        let watermarked = add_watermark(text, "test", Some("did:web:ownify.tech"));
         let stripped = strip_watermark(&watermarked);
         assert_eq!(stripped, text);
     }
