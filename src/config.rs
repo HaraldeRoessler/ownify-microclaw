@@ -4483,6 +4483,7 @@ subagents:
                 bearer_token: Some(" token ".into()),
                 description: Some(" executes ".into()),
                 default_session_key: Some(" team/work ".into()),
+                peer_did: None,
             },
         );
 

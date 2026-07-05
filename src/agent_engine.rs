@@ -16,6 +16,7 @@ use crate::run_control;
 use crate::runtime::AppState;
 use crate::tools::ToolAuthContext;
 use crate::verifier::{self, call_verifier};
+use crate::watermark;
 use microclaw_core::llm_types::{
     ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock,
 };
@@ -1585,15 +1586,18 @@ async fn process_with_agent_logic(
                     text: final_text.clone(),
                 });
             }
+            // EU AI Act Article 50: add invisible watermark to AI-generated text
+            let agent_slug = &state.config.bot_username;
+            let watermarked = watermark::add_watermark(&final_text, agent_slug);
             info!(
                 chat_id,
                 channel = context.caller_channel,
                 iterations = iteration + 1,
                 duration_ms = request_start.elapsed().as_millis(),
-                response_len = final_text.len(),
-                "Agent request completed"
+                response_len = watermarked.len(),
+                "Agent request completed (watermarked)"
             );
-            return Ok(final_text);
+            return Ok(watermarked);
         }
 
         if stop_reason == "tool_use" {
@@ -1640,7 +1644,9 @@ async fn process_with_agent_logic(
                         text: final_text.clone(),
                     });
                 }
-                return Ok(final_text);
+                // EU AI Act Article 50: add invisible watermark
+                let agent_slug = &state.config.bot_username;
+                return Ok(watermark::add_watermark(&final_text, agent_slug));
             }
             let assistant_content: Vec<ContentBlock> = response
                 .content

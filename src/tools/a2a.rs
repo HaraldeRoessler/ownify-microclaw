@@ -539,6 +539,7 @@ mod tests {
                 bearer_token: Some("secret".into()),
                 description: Some("plans".into()),
                 default_session_key: Some("a2a:planner".into()),
+                peer_did: Some("did:moltrust:test123".into()),
             },
         );
         let tool = A2AListPeersTool::new(&cfg);
@@ -591,6 +592,7 @@ mod tests {
                 bearer_token: Some("secret".into()),
                 description: None,
                 default_session_key: None,
+                peer_did: Some("did:moltrust:worker123".into()),
             },
         );
         let tool = A2ASendTool::new(&cfg);

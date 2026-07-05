@@ -268,6 +268,7 @@ mod tests {
                 bearer_token: None,
                 description: None,
                 default_session_key: None,
+                peer_did: None,
             },
         );
 
