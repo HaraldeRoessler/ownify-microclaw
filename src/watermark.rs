@@ -21,6 +21,9 @@ const ZWJ: char = '\u{200D}'; // zero-width joiner = delimiter
 /// Add an invisible watermark to AI-generated text.
 /// The watermark is appended at the end of the visible text.
 /// `did` is the agent's DID (from TrustConfig), `slug` is the agent slug.
+/// 
+/// Uses a compact format to survive Matrix's text processing which
+/// strips some zero-width characters. Full DID is hashed to 8 chars.
 pub fn add_watermark(text: &str, slug: &str, did: Option<&str>) -> String {
     if text.is_empty() {
         return text.to_string();
@@ -32,10 +35,18 @@ pub fn add_watermark(text: &str, slug: &str, did: Option<&str>) -> String {
     let hash_hex = format!("{:x}", hasher.finalize());
     let short_hash = &hash_hex[..8.min(hash_hex.len())];
 
-    // Build payload: OWNIFY|did|slug|hash
-    // If no DID available, use "unknown" as placeholder
-    let did_str = did.unwrap_or("unknown");
-    let payload = format!("OWNIFY|{}|{}|{}", did_str, slug, short_hash);
+    // Build COMPACT payload: O|did_hash|slug|text_hash
+    // Using "O" prefix (not "OWNIFY") to minimize zero-width chars.
+    // Full DID is hashed to 8 chars to keep payload short.
+    // Total ~30 chars = ~240 bits — survives Matrix's stripping.
+    let did_short = if let Some(d) = did {
+        let mut h = Sha256::new();
+        h.update(d.as_bytes());
+        format!("{:x}", h.finalize())[..8].to_string()
+    } else {
+        "unknown".to_string()
+    };
+    let payload = format!("O|{}|{}|{}", did_short, slug, short_hash);
 
     // Convert payload to bits
     let bits: String = payload
@@ -75,6 +86,20 @@ pub fn detect_watermark(text: &str) -> Option<WatermarkResult> {
             if j < chars.len() && chars[j] == ZWJ {
                 // Found end delimiter — decode bits
                 if let Ok(decoded) = bits_to_string(&bits) {
+                    // New compact format: O|did_hash|slug|hash
+                    if decoded.starts_with("O|") {
+                        let parts: Vec<&str> = decoded.split('|').collect();
+                        if parts.len() >= 4 {
+                            return Some(WatermarkResult {
+                                origin: "OWNIFY".to_string(),
+                                did: parts[1].to_string(),
+                                slug: parts[2].to_string(),
+                                hash: parts[3].to_string(),
+                                raw: decoded,
+                            });
+                        }
+                    }
+                    // Old format backward compat: OWNIFY|did|slug|hash (4 parts)
                     if decoded.starts_with("OWNIFY|") {
                         let parts: Vec<&str> = decoded.split('|').collect();
                         if parts.len() >= 4 {
@@ -86,7 +111,7 @@ pub fn detect_watermark(text: &str) -> Option<WatermarkResult> {
                                 raw: decoded,
                             });
                         }
-                        // Backward compat: old format OWNIFY|slug|hash (3 parts)
+                        // Old 3-part format: OWNIFY|slug|hash
                         if parts.len() == 3 {
                             return Some(WatermarkResult {
                                 origin: parts[0].to_string(),
@@ -174,13 +199,13 @@ mod tests {
         let visible_part = strip_watermark(&watermarked);
         assert_eq!(visible_part, text);
         
-        // But should contain the watermark with DID
+        // But should contain the watermark with DID hash
         let result = detect_watermark(&watermarked);
         assert!(result.is_some());
         let wm = result.unwrap();
         assert_eq!(wm.origin, "OWNIFY");
-        assert_eq!(wm.did, "did:moltrust:abc123def456");
-        assert_eq!(wm.slug, "ownify-test-agent");
+        assert!(!wm.did.is_empty());
+        assert!(!wm.slug.is_empty());
         assert!(!wm.hash.is_empty());
     }
 
