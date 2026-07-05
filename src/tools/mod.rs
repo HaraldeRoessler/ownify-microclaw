@@ -178,6 +178,9 @@ impl ToolRegistry {
             Box::new(write_file::WriteFileTool::new_with_isolation(
                 &config.working_dir,
                 config.working_dir_isolation,
+            ).with_agent_identity(
+                agent_slug_for_disclosure(config),
+                agent_did_for_disclosure(config),
             )),
             Box::new(edit_file::EditFileTool::new_with_isolation(
                 &config.working_dir,
@@ -263,6 +266,9 @@ impl ToolRegistry {
             Box::new(export_chat::ExportChatTool::new(
                 db.clone(),
                 &config.data_dir,
+            ).with_agent_identity(
+                agent_slug_for_disclosure(config),
+                agent_did_for_disclosure(config),
             )),
             Box::new(subagents::SessionsSpawnTool::new(
                 config,
@@ -422,6 +428,9 @@ impl ToolRegistry {
             Box::new(write_file::WriteFileTool::new_with_isolation(
                 &config.working_dir,
                 config.working_dir_isolation,
+            ).with_agent_identity(
+                agent_slug_for_disclosure(config),
+                agent_did_for_disclosure(config),
             )),
             Box::new(edit_file::EditFileTool::new_with_isolation(
                 &config.working_dir,
@@ -609,6 +618,25 @@ impl ToolRegistry {
         }
         result
     }
+}
+
+/// Get the agent slug for AI disclosure footers (Article 50).
+/// Uses bot_username, or falls back to OWNIFY_TENANT_SLUG env var.
+fn agent_slug_for_disclosure(config: &Config) -> String {
+    if !config.bot_username.trim().is_empty() {
+        return config.bot_username.clone();
+    }
+    std::env::var("OWNIFY_TENANT_SLUG").unwrap_or_default()
+}
+
+/// Get the agent DID for AI disclosure footers (Article 50).
+/// Prefers moltrust_did, falls back to ownify_did.
+fn agent_did_for_disclosure(config: &Config) -> Option<String> {
+    config
+        .trust
+        .moltrust_did
+        .clone()
+        .or_else(|| config.trust.ownify_did.clone())
 }
 
 #[cfg(test)]
