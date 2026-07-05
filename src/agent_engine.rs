@@ -1587,10 +1587,14 @@ async fn process_with_agent_logic(
                 });
             }
             // EU AI Act Article 50: add invisible watermark to AI-generated text
-            let agent_slug = &state.config.bot_username;
+            let agent_slug = if !state.config.bot_username.trim().is_empty() {
+                state.config.bot_username.clone()
+            } else {
+                std::env::var("OWNIFY_TENANT_SLUG").unwrap_or_default()
+            };
             let agent_did = state.config.trust.moltrust_did.as_deref()
                 .or(state.config.trust.ownify_did.as_deref());
-            let watermarked = watermark::add_watermark(&final_text, agent_slug, agent_did);
+            let watermarked = watermark::add_watermark(&final_text, &agent_slug, agent_did);
             info!(
                 chat_id,
                 channel = context.caller_channel,
@@ -1647,10 +1651,14 @@ async fn process_with_agent_logic(
                     });
                 }
                 // EU AI Act Article 50: add invisible watermark
-                let agent_slug = &state.config.bot_username;
+                let agent_slug = if !state.config.bot_username.trim().is_empty() {
+                    state.config.bot_username.clone()
+                } else {
+                    std::env::var("OWNIFY_TENANT_SLUG").unwrap_or_default()
+                };
                 let agent_did = state.config.trust.moltrust_did.as_deref()
                     .or(state.config.trust.ownify_did.as_deref());
-                return Ok(watermark::add_watermark(&final_text, agent_slug, agent_did));
+                return Ok(watermark::add_watermark(&final_text, &agent_slug, agent_did));
             }
             let assistant_content: Vec<ContentBlock> = response
                 .content
