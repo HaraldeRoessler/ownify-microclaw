@@ -3341,13 +3341,28 @@ function App() {
               }
             >
               <div className="mx-auto w-full max-w-5xl px-3 pt-3">
+                {/* EU AI Act Article 50 — visible AI disclosure notice */}
+                <Callout.Root color="amber" size="1" variant="soft">
+                  <Callout.Text>
+                    ⚠ You are interacting with an ownify AI agent. Content is AI-generated.
+                    Verify at{' '}
+                    <a
+                      href="https://ownify.ai/verify-ai"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'inherit', textDecoration: 'underline' }}
+                    >
+                      ownify.ai/verify-ai
+                    </a>
+                  </Callout.Text>
+                </Callout.Root>
                 {replayNotice ? (
-                  <Callout.Root color="orange" size="1" variant="soft">
+                  <Callout.Root color="orange" size="1" variant="soft" className="mt-2">
                     <Callout.Text>{replayNotice}</Callout.Text>
                   </Callout.Root>
                 ) : null}
                 {error ? (
-                  <Callout.Root color="red" size="1" variant="soft" className={replayNotice ? 'mt-2' : ''}>
+                  <Callout.Root color="red" size="1" variant="soft" className={replayNotice ? 'mt-2' : 'mt-2'}>
                     <Callout.Text>{error}</Callout.Text>
                   </Callout.Root>
                 ) : null}
