@@ -1276,6 +1276,38 @@ async fn process_with_agent_logic(
             let model = effective_model.clone();
             let input_tokens = i64::from(usage.input_tokens);
             let output_tokens = i64::from(usage.output_tokens);
+
+            // Art. 12: log LLM call to the local hash-chained audit_logs table.
+            // This captures every LLM invocation with model, tokens, and latency.
+            let llm_status = if response.stop_reason.as_deref() == Some("end_turn")
+                || response.stop_reason.as_deref() == Some("tool_use")
+            { "success" } else { "error" };
+            let llm_latency = request_start.elapsed().as_millis() as i64;
+            let llm_detail = serde_json::json!({
+                "model": &model,
+                "provider": &provider,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": llm_latency,
+                "status": llm_status,
+                "stop_reason": response.stop_reason.clone(),
+            });
+            let llm_detail_str = llm_detail.to_string();
+            let llm_channel = channel.clone();
+            let llm_model = model.clone();
+            let _ = call_blocking(state.db.clone(), move |db| {
+                db.log_audit_event(
+                    "llm",
+                    &llm_channel,
+                    "generation",
+                    Some(&llm_model),
+                    llm_status,
+                    Some(&llm_detail_str),
+                )
+                .map(|_| ())
+            })
+            .await;
+
             let _ = call_blocking(state.db.clone(), move |db| {
                 db.log_llm_usage(
                     chat_id,

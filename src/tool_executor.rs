@@ -550,6 +550,35 @@ async fn execute_single_tool(
         }
     }
 
+    // Art. 12: log every tool call to the local hash-chained audit_logs table.
+    // Captures: tool name, status (success/error), duration, error type.
+    // Does NOT log tool parameters or results (GDPR data minimization).
+    {
+        let tool_name = name.clone();
+        let tool_status = if result.is_error { "error" } else { "success" };
+        let tool_error = result.error_type.clone();
+        let tool_detail = serde_json::json!({
+            "tool": tool_name,
+            "status": tool_status,
+            "error_type": tool_error,
+        });
+        let tool_detail_str = tool_detail.to_string();
+        let channel_str = caller_channel.to_string();
+        let db_clone = state.db.clone();
+        let _ = microclaw_storage::db::call_blocking(db_clone, move |db| {
+            db.log_audit_event(
+                "tool",
+                &channel_str,
+                &tool_name,
+                None,
+                tool_status,
+                Some(&tool_detail_str),
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
+
     // Error tracking
     if result.is_error && result.error_type.as_deref() != Some("approval_required") {
         let suppress = result
