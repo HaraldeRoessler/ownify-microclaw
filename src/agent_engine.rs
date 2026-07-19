@@ -631,6 +631,40 @@ pub(crate) async fn process_with_agent_impl(
             ),
         };
 
+        // Art. 12: Log agent errors (risk identification per Art. 12(2)(a)).
+        // We log the error TYPE (not the full message, which may contain user data).
+        if let Some(ref err_msg) = error_msg {
+            let err_channel = context.caller_channel.to_string();
+            let err_chat_id = context.chat_id;
+            let err_type = if err_msg.contains("timeout") || err_msg.contains("Timeout") {
+                "timeout"
+            } else if err_msg.contains("llm") || err_msg.contains("LLM") || err_msg.contains("upstream") {
+                "llm_failure"
+            } else if err_msg.contains("tool") || err_msg.contains("Tool") {
+                "tool_failure"
+            } else if err_msg.contains("memory") || err_msg.contains("Memory") {
+                "memory_failure"
+            } else {
+                "agent_error"
+            };
+            let err_detail = serde_json::json!({
+                "error_type": err_type,
+                "chat_id": err_chat_id,
+                "channel": err_channel,
+            }).to_string();
+            let err_db = state.db.clone();
+            let _ = call_blocking(err_db, move |db| {
+                db.log_audit_event(
+                    "agent_error",
+                    "system",
+                    "agent_failed",
+                    None,
+                    "error",
+                    Some(&err_detail),
+                ).map(|_| ())
+            }).await;
+        }
+
         if let Some(msg) = error_msg {
             attrs.push(kv("error.message", &msg));
         }
@@ -673,6 +707,30 @@ async fn process_with_agent_logic(
         has_image = image_data.is_some(),
         "Agent request started"
     );
+
+    // Art. 12: Log that a user sent a message to the agent.
+    // We log channel + message length (NOT content — GDPR data minimization).
+    {
+        let audit_channel: String = context.caller_channel.to_string();
+        let audit_chat_id = chat_id;
+        let audit_msg_len = override_prompt.as_ref().map(|p| p.len()).unwrap_or(0);
+        let audit_detail = serde_json::json!({
+            "channel": audit_channel,
+            "chat_id": audit_chat_id,
+            "message_length": audit_msg_len,
+        }).to_string();
+        let audit_db = state.db.clone();
+        let _ = call_blocking(audit_db, move |db| {
+            db.log_audit_event(
+                "agent_message",
+                &audit_channel,
+                "user_message",
+                None,
+                "success",
+                Some(&audit_detail),
+            ).map(|_| ())
+        }).await;
+    }
 
     if let Some(reply) =
         maybe_handle_explicit_memory_command(state, chat_id, override_prompt, image_data.clone())
