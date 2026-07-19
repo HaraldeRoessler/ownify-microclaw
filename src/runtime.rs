@@ -77,6 +77,7 @@ pub struct AppState {
     pub metric_exporter: Option<Arc<OtlpMetricExporter>>,
     pub trace_exporter: Option<Arc<OtlpTraceExporter>>,
     pub log_exporter: Option<Arc<OtlpLogExporter>>,
+    pub audit_sink: Arc<crate::audit_sink::AuditSink>,
 }
 
 fn prepare_channel_runtimes<T, Build, Register, ModelOverride>(
@@ -516,6 +517,7 @@ pub async fn run(
         metric_exporter,
         trace_exporter,
         log_exporter,
+        audit_sink: Arc::new(crate::audit_sink::AuditSink::new()),
     });
 
     if let Err(err) = state.memory_backend.run_startup_health_check().await {

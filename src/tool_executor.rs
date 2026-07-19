@@ -565,6 +565,8 @@ async fn execute_single_tool(
         let tool_detail_str = tool_detail.to_string();
         let channel_str = caller_channel.to_string();
         let db_clone = state.db.clone();
+        let tool_detail_for_sink = tool_detail_str.clone();
+        let tool_name_for_sink = tool_name.clone();
         let _ = microclaw_storage::db::call_blocking(db_clone, move |db| {
             db.log_audit_event(
                 "tool",
@@ -577,6 +579,14 @@ async fn execute_single_tool(
             .map(|_| ())
         })
         .await;
+        // Also send to central CP audit-sink
+        state.audit_sink.enqueue(
+            "agent_tool_call",
+            &tool_name_for_sink,
+            None,
+            tool_status,
+            &tool_detail_for_sink,
+        ).await;
     }
 
     // Error tracking

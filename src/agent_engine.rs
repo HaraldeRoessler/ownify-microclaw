@@ -633,6 +633,9 @@ pub(crate) async fn process_with_agent_impl(
 
         // Art. 12: Log agent errors (risk identification per Art. 12(2)(a)).
         // We log the error TYPE (not the full message, which may contain user data).
+        // Art. 12: Log agent errors (risk identification per Art. 12(2)(a)).
+        // We log the error TYPE (not the full message, which may contain user data).
+        // Log to BOTH local SQLite (hash-chained) and central CP audit-sink.
         if let Some(ref err_msg) = error_msg {
             let err_channel = context.caller_channel.to_string();
             let err_chat_id = context.chat_id;
@@ -653,6 +656,7 @@ pub(crate) async fn process_with_agent_impl(
                 "channel": err_channel,
             }).to_string();
             let err_db = state.db.clone();
+            let err_detail_for_sink = err_detail.clone();
             let _ = call_blocking(err_db, move |db| {
                 db.log_audit_event(
                     "agent_error",
@@ -663,6 +667,14 @@ pub(crate) async fn process_with_agent_impl(
                     Some(&err_detail),
                 ).map(|_| ())
             }).await;
+            // Also send to central CP audit-sink (for portal display)
+            state.audit_sink.enqueue(
+                "agent_error",
+                "agent_failed",
+                None,
+                "error",
+                &err_detail_for_sink,
+            ).await;
         }
 
         if let Some(msg) = error_msg {
@@ -710,6 +722,7 @@ async fn process_with_agent_logic(
 
     // Art. 12: Log that a user sent a message to the agent.
     // We log channel + message length (NOT content — GDPR data minimization).
+    // Log to BOTH local SQLite (hash-chained) and central CP audit-sink.
     {
         let audit_channel: String = context.caller_channel.to_string();
         let audit_chat_id = chat_id;
@@ -719,6 +732,7 @@ async fn process_with_agent_logic(
             "chat_id": audit_chat_id,
             "message_length": audit_msg_len,
         }).to_string();
+        let audit_detail_for_sink = audit_detail.clone();
         let audit_db = state.db.clone();
         let _ = call_blocking(audit_db, move |db| {
             db.log_audit_event(
@@ -730,6 +744,14 @@ async fn process_with_agent_logic(
                 Some(&audit_detail),
             ).map(|_| ())
         }).await;
+        // Also send to central CP audit-sink (for portal display)
+        state.audit_sink.enqueue(
+            "agent_message",
+            "user_message",
+            None,
+            "success",
+            &audit_detail_for_sink,
+        ).await;
     }
 
     if let Some(reply) =
@@ -1353,6 +1375,8 @@ async fn process_with_agent_logic(
             let llm_detail_str = llm_detail.to_string();
             let llm_channel = channel.clone();
             let llm_model = model.clone();
+            let llm_detail_for_sink = llm_detail_str.clone();
+            let llm_model_for_sink = llm_model.clone();
             let _ = call_blocking(state.db.clone(), move |db| {
                 db.log_audit_event(
                     "llm",
@@ -1365,6 +1389,14 @@ async fn process_with_agent_logic(
                 .map(|_| ())
             })
             .await;
+            // Also send to central CP audit-sink
+            state.audit_sink.enqueue(
+                "agent_llm_call",
+                "generation",
+                Some(&llm_model_for_sink),
+                llm_status,
+                &llm_detail_for_sink,
+            ).await;
 
             let _ = call_blocking(state.db.clone(), move |db| {
                 db.log_llm_usage(
@@ -3322,6 +3354,7 @@ mod tests {
             metric_exporter: None,
             trace_exporter: None,
             log_exporter: None,
+            audit_sink: std::sync::Arc::new(crate::audit_sink::AuditSink::default()),
         })
     }
 
@@ -3365,6 +3398,7 @@ mod tests {
             metric_exporter: None,
             trace_exporter: None,
             log_exporter: None,
+            audit_sink: std::sync::Arc::new(crate::audit_sink::AuditSink::default()),
         })
     }
 

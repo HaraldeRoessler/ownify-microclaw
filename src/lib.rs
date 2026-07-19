@@ -15,6 +15,7 @@ pub mod acp;
 pub mod acp_subagent;
 pub mod agent_engine;
 pub mod ai_disclosure;
+pub mod audit_sink;
 pub mod channels;
 pub mod chat_commands;
 pub mod chat_turn_queue;

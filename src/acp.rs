@@ -85,6 +85,7 @@ pub async fn serve(
         metric_exporter: None,
         trace_exporter: None,
         log_exporter: None,
+            audit_sink: std::sync::Arc::new(crate::audit_sink::AuditSink::default()),
     });
 
     crate::scheduler::spawn_scheduler(app_state.clone());
