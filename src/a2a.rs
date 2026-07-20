@@ -5,6 +5,7 @@ use crate::config::Config;
 pub const A2A_PROTOCOL_VERSION: &str = "microclaw-a2a/v1";
 pub const A2A_AGENT_CARD_PATH: &str = "/api/a2a/agent-card";
 pub const A2A_MESSAGE_PATH: &str = "/api/a2a/message";
+pub const A2A_INVOKE_TOOL_PATH: &str = "/api/a2a/invoke_tool";
 pub const A2A_TASK_CREATE_PATH: &str = "/api/a2a/task";
 pub const A2A_TASK_STATUS_PATH: &str = "/api/a2a/task/status";
 
@@ -25,6 +26,7 @@ pub struct A2AAgentCard {
 pub struct A2AEndpoints {
     pub agent_card: String,
     pub message: String,
+    pub invoke_tool: String,
     pub task_create: String,
     pub task_status: String,
 }
@@ -95,6 +97,33 @@ pub struct A2AMessageResponse {
 pub struct A2AOutputPart {
     pub kind: String,
     pub text: String,
+}
+
+/// Request body for POST /api/a2a/invoke_tool — standardised tool
+/// invocation. External agents call this to invoke a specific tool
+/// (e.g. web_search, calculator) rather than sending a natural-language
+/// message. The gateway's firewall chain authenticates the caller and
+/// checks the `invoke_tool:<name>` capability before forwarding here.
+#[derive(Debug, Deserialize)]
+pub struct A2AInvokeToolRequest {
+    /// Tool name — must match a registered tool's `name` field (e.g.
+    /// "web_search", "calculate", "read_memory").
+    pub tool: String,
+    /// Tool-specific input as a JSON object. Passed to the agent loop
+    /// as part of the constructed prompt.
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+/// Response for POST /api/a2a/invoke_tool. Mirrors the shape the Python
+/// SDK (ownify_aae.A2AClient.invoke_tool) expects: the `result` field
+/// carries the agent's text output, `tool` echoes the requested tool
+/// name for correlation, and `ok` indicates success.
+#[derive(Debug, Serialize)]
+pub struct A2AInvokeToolResponse {
+    pub ok: bool,
+    pub tool: String,
+    pub result: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -232,6 +261,7 @@ pub fn build_agent_card(config: &Config) -> A2AAgentCard {
         endpoints: A2AEndpoints {
             agent_card: format!("{prefix}{A2A_AGENT_CARD_PATH}"),
             message: format!("{prefix}{A2A_MESSAGE_PATH}"),
+            invoke_tool: format!("{prefix}{A2A_INVOKE_TOOL_PATH}"),
             task_create: format!("{prefix}{A2A_TASK_CREATE_PATH}"),
             task_status: format!("{prefix}{A2A_TASK_STATUS_PATH}"),
         },

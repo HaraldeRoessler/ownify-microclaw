@@ -1,8 +1,8 @@
 use super::*;
 use crate::a2a::{
     build_agent_card, default_session_key_for_source, local_agent_name, sanitize_for_json,
-    A2AMessageRequest, A2AMessageResponse, A2ATaskRequest, A2ATaskResponse,
-    A2ATaskStatusResponse, A2A_PROTOCOL_VERSION,
+    A2AInvokeToolRequest, A2AInvokeToolResponse, A2AMessageRequest, A2AMessageResponse,
+    A2ATaskRequest, A2ATaskResponse, A2ATaskStatusResponse, A2A_PROTOCOL_VERSION,
 };
 use axum::extract::Query;
 
@@ -258,6 +258,103 @@ pub(super) async fn api_a2a_message(
         agent_name: local_agent_name(&state.app_state.config),
         session_key: resolved_session_key,
         response,
+    }))
+}
+
+// ── A2A Invoke Tool (standardised tool invocation) ───────────────────────
+
+/// POST /api/a2a/invoke_tool — standardised tool invocation endpoint.
+///
+/// External agents call this to invoke a specific tool on the agent
+/// (e.g. `web_search`, `calculate`) rather than sending a natural-
+/// language message. The gateway's firewall chain authenticates the
+/// caller via AAE and checks the `invoke_tool:<name>` capability before
+/// forwarding. This handler constructs a structured prompt from the
+/// `{tool, input}` body and runs it through the same agent loop as
+/// `api_a2a_message`, then wraps the response as `{tool, result, ok}`
+/// for SDK compatibility.
+pub(super) async fn api_a2a_invoke_tool(
+    headers: HeaderMap,
+    State(state): State<WebState>,
+    Json(body): Json<A2AInvokeToolRequest>,
+) -> Result<Json<A2AInvokeToolResponse>, (StatusCode, String)> {
+    metrics_http_inc(&state).await;
+    if !state.app_state.config.a2a.enabled {
+        return Err((StatusCode::NOT_FOUND, "A2A is disabled".into()));
+    }
+    if state.app_state.config.a2a.shared_tokens.is_empty() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "A2A inbound auth is not configured".into(),
+        ));
+    }
+    if !a2a_token_allowed(&state.app_state.config, &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid A2A bearer token".into()));
+    }
+
+    let tool = sanitize_for_json(body.tool.trim());
+    if tool.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "tool is required".into()));
+    }
+
+    // Construct the prompt: ask the agent to invoke the tool with the
+    // given input and return only the output. The agent's skills system
+    // will match the tool name to a registered skill and execute it.
+    let input_json = serde_json::to_string(&body.input)
+        .unwrap_or_else(|_| "{}".to_string());
+    let message = format!(
+        "Invoke tool \"{tool}\" with input: {input_json}\n\nReturn only the tool's output, no explanation."
+    );
+
+    // Session key: per-caller isolation via x-ownify-caller-did header.
+    let caller_did: Option<String> = headers
+        .get("x-ownify-caller-did")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.starts_with("did:"))
+        .map(|v| v.to_string());
+
+    let session_key = caller_did
+        .as_ref()
+        .map(|did| format!("a2a:invoke:{did}"))
+        .unwrap_or_else(|| "a2a:invoke".to_string());
+
+    let allowed_tools = allowed_tools_for_caller(&headers);
+
+    let result = super::send_and_store_response(
+        state.clone(),
+        super::SendRequest {
+            session_key: Some(session_key),
+            sender_name: Some("a2a-invoke".to_string()),
+            message,
+            allowed_tools,
+            images: None,
+        },
+    )
+    .await?;
+
+    let payload = result.0;
+    let response_text = payload
+        .get("response")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    audit_log(
+        &state,
+        "a2a",
+        "a2a-invoke",
+        "a2a.invoke_tool",
+        Some(&tool),
+        "ok",
+        None,
+    )
+    .await;
+
+    Ok(Json(A2AInvokeToolResponse {
+        ok: true,
+        tool: tool.clone(),
+        result: response_text,
     }))
 }
 
