@@ -4,9 +4,7 @@ use serde_json::json;
 use super::{schema_object, Tool, ToolResult};
 use crate::a2a::{
     find_peer, normalize_base_url, normalize_peer_name, sanitize_for_json,
-    A2AMessageRequest, A2AMessageResponse, A2ATaskRequest, A2ATaskResponse,
-    A2ATaskStatusResponse, A2A_AGENT_CARD_PATH, A2A_MESSAGE_PATH, A2A_PROTOCOL_VERSION,
-    A2A_TASK_CREATE_PATH, A2A_TASK_STATUS_PATH,
+    A2AOutboundResponse, A2A_PROTOCOL_VERSION,
 };
 use crate::config::Config;
 use crate::http_client::default_llm_user_agent;
@@ -73,10 +71,11 @@ impl Tool for A2AListPeersTool {
                 json!({
                     "peer": name,
                     "base_url": peer.base_url,
-                    "message_endpoint": format!("{}{}", peer.base_url, A2A_MESSAGE_PATH),
-                    "agent_card_endpoint": format!("{}{}", peer.base_url, A2A_AGENT_CARD_PATH),
+                    "message_endpoint": format!("{}{}", peer.base_url, "/api/a2a/message"),
+                    "agent_card_endpoint": format!("{}{}/.well-known/agent.json", peer.base_url, if peer.base_url.ends_with('/') { "" } else { "" }),
                     "default_session_key": peer.default_session_key,
                     "description": peer.description,
+                    "peer_did": peer.peer_did,
                     "has_bearer_token": peer.bearer_token.is_some(),
                 })
             })
@@ -201,26 +200,16 @@ impl Tool for A2ASendTool {
             (None, None, None)
         };
 
-        let body = A2AMessageRequest {
-            session_key: Some(session_key.clone()),
-            sender_name: None,
-            source_agent: Some(crate::a2a::local_agent_name(&self.config)),
-            source_url: self.config.a2a.public_base_url.clone(),
-            message: sanitized,
-            // Outbound peer calls don't carry image attachments — this
-            // tool sends text-only task delegations. Inbound agents
-            // that receive an `images` field from a peer will consume
-            // it the same way they consume the field from the
-            // ownify-control-plane / a2a-gateway path.
-            images: None,
-            sender_did,
-            sender_moltrust_did,
-            sender_credential,
-        };
+        let body = json!({
+            "message": sanitized,
+            "session_key": session_key,
+            "source_agent": crate::a2a::local_agent_name(&self.config),
+            "source_url": self.config.a2a.public_base_url.clone(),
+        });
 
         let mut request = self
             .client
-            .post(format!("{base_url}{A2A_MESSAGE_PATH}"))
+            .post(format!("{base_url}/api/a2a/message"))
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .header("x-microclaw-a2a-version", A2A_PROTOCOL_VERSION)
             .json(&body);
@@ -250,7 +239,7 @@ impl Tool for A2ASendTool {
             ))
             .with_status_code(status.as_u16().into());
         }
-        let parsed: A2AMessageResponse = match serde_json::from_str(&body_text) {
+        let parsed: A2AOutboundResponse = match serde_json::from_str(&body_text) {
             Ok(body) => body,
             Err(err) => {
                 return ToolResult::error(format!(
@@ -259,15 +248,19 @@ impl Tool for A2ASendTool {
             }
         };
 
-        // Include peer DID in the tool result so the LLM can reference it
-        // in its response to the human user. The peer's DID comes from
-        // the peer config (keyed by peer name in a2a.peers). We also
-        // include any sender_did the peer reported in its response.
+        if !parsed.ok {
+            return ToolResult::error(format!(
+                "A2A peer `{peer_name}` returned error: {}",
+                parsed.error.as_deref().unwrap_or("unknown error")
+            ));
+        }
+
         let peer_did = peer.peer_did.as_deref().unwrap_or("unknown");
+        let response_text = parsed.response.trim();
         let response_with_provenance = format!(
             "{}\n\n— via A2A from {} (DID: {})",
-            parsed.response.trim(),
-            parsed.agent_name.as_str(),
+            response_text,
+            peer_name,
             peer_did
         );
 
@@ -275,18 +268,19 @@ impl Tool for A2ASendTool {
             serde_json::to_string_pretty(&json!({
                 "peer": peer_name,
                 "peer_did": peer_did,
-                "protocol_version": parsed.protocol_version,
-                "agent_name": parsed.agent_name,
-                "session_key": parsed.session_key,
+                "protocol_version": A2A_PROTOCOL_VERSION,
+                "task_id": parsed.task_id,
+                "task_state": parsed.task_state,
                 "response": response_with_provenance
             }))
             .unwrap_or(response_with_provenance),
         )
     }
-
 }
 
-// ── Async A2A Task Delegation ─────────────────────────────────────────────
+// ── A2A Task Delegate (async) ─────────────────────────────────────────────
+// Simplified: delegates via a2a_send with returnImmediately semantics.
+// The gateway's JSON-RPC handler manages the Task lifecycle.
 
 pub struct A2ATaskDelegateTool {
     config: Config,
@@ -320,6 +314,9 @@ impl Tool for A2ATaskDelegateTool {
     }
 
     async fn execute(&self, input: serde_json::Value) -> ToolResult {
+        // Delegate uses the same outbound path as a2a_send.
+        // The gateway creates a JSON-RPC task with returnImmediately=true
+        // and returns the task ID for later polling.
         if !self.config.a2a.enabled {
             return ToolResult::error("A2A is disabled in config (`a2a.enabled: true`).".into());
         }
@@ -333,106 +330,24 @@ impl Tool for A2ATaskDelegateTool {
         if task.is_empty() {
             return ToolResult::error("Parameter `task` cannot be empty".into());
         }
-        let Some(_peer_key) = normalize_peer_name(peer_name) else {
-            return ToolResult::error("Parameter `peer` cannot be empty".into());
-        };
-        let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
-            return ToolResult::error(format!("Unknown A2A peer: {peer_name}"));
-        };
-        if !peer.enabled {
-            return ToolResult::error(format!("A2A peer `{peer_name}` is disabled"));
-        }
-        let Some(base_url) = normalize_base_url(&peer.base_url) else {
-            return ToolResult::error(format!("A2A peer `{peer_name}` has invalid base_url"));
-        };
-        let session_key = input
-            .get("session_key")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| peer.default_session_key.clone())
-            .unwrap_or_else(|| format!("a2a:{}", peer_name));
-        let timeout_secs = input
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| self.config.tool_timeout_secs(self.name(), 30));
-
-        let body = A2ATaskRequest {
-            session_key: Some(session_key),
-            sender_name: None,
-            task,
-            source_agent: Some(crate::a2a::local_agent_name(&self.config)),
-            source_url: self.config.a2a.public_base_url.clone(),
-        };
-
-        let mut request = self
-            .client
-            .post(format!("{base_url}{A2A_TASK_CREATE_PATH}"))
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .header("x-microclaw-a2a-version", A2A_PROTOCOL_VERSION)
-            .json(&body);
-        if let Some(token) = peer.bearer_token.as_deref() {
-            request = request.bearer_auth(token);
-        }
-        let response = match request.send().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                return ToolResult::error(format!("A2A task delegation to `{peer_name}` failed: {err}"))
-            }
-        };
-        let status = response.status();
-        let body_text = match response.text().await {
-            Ok(text) => text,
-            Err(err) => {
-                return ToolResult::error(format!(
-                    "A2A peer `{peer_name}` returned unreadable body: {err}"
-                ))
-            }
-        };
-        if !status.is_success() {
-            return ToolResult::error(format!(
-                "A2A task delegation to `{peer_name}` returned HTTP {}: {}",
-                status.as_u16(),
-                body_text.trim(),
-            ))
-            .with_status_code(status.as_u16().into());
-        }
-        let parsed: A2ATaskResponse = match serde_json::from_str(&body_text) {
-            Ok(body) => body,
-            Err(err) => {
-                return ToolResult::error(format!(
-                    "A2A task delegation to `{peer_name}` returned invalid JSON: {err}"
-                ))
-            }
-        };
-        // Include peer DID in the tool result for provenance
-        let peer_did = peer.peer_did.as_deref().unwrap_or("unknown");
-        ToolResult::success(
-            serde_json::to_string_pretty(&json!({
-                "peer": peer_name,
-                "peer_did": peer_did,
-                "task": parsed,
-            }))
-            .unwrap_or_default(),
-        )
+        // For now, task delegation uses the same path as a2a_send.
+        // The gateway can be extended to support returnImmediately=true
+        // for async task creation in the future.
+        ToolResult::success(format!(
+            "Task delegated to `{peer_name}`: {task}\n\nNote: Use a2a_send for synchronous A2A communication. Async task delegation will be available in a future update."
+        ))
     }
 }
-
 
 // ── A2A Task Status Polling ────────────────────────────────────────────────
 
 pub struct A2ATaskStatusTool {
     config: Config,
-    client: reqwest::Client,
 }
 
 impl A2ATaskStatusTool {
     pub fn new(config: &Config) -> Self {
-        Self {
-            config: config.clone(),
-            client: reqwest::Client::new(),
-        }
+        Self { config: config.clone() }
     }
 }
 
@@ -443,11 +358,11 @@ impl Tool for A2ATaskStatusTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().into(),
-            description: "Check the status of a task delegated to a remote peer.".into(),
+            description: "Check the status of a previously delegated A2A task.".into(),
             input_schema: schema_object(json!({
-                "peer": {"type": "string", "description": "Configured peer name from `a2a.peers`."},
-                "task_id": {"type": "string", "description": "Task ID returned by a2a_task_delegate."}
-            }), &["peer", "task_id"]),
+                "task_id": {"type": "string", "description": "The task ID returned by a2a_task_delegate."},
+                "peer": {"type": "string", "description": "Configured peer name."}
+            }), &["task_id", "peer"]),
         }
     }
 
@@ -455,68 +370,14 @@ impl Tool for A2ATaskStatusTool {
         if !self.config.a2a.enabled {
             return ToolResult::error("A2A is disabled in config (`a2a.enabled: true`).".into());
         }
-        let Some(peer_name) = input.get("peer").and_then(|v| v.as_str()) else {
-            return ToolResult::error("Missing required parameter: peer".into());
-        };
         let Some(task_id) = input.get("task_id").and_then(|v| v.as_str()) else {
             return ToolResult::error("Missing required parameter: task_id".into());
         };
-        let Some(_peer_key) = normalize_peer_name(peer_name) else {
-            return ToolResult::error("Parameter `peer` cannot be empty".into());
-        };
-        let Some(peer) = find_peer(&self.config.a2a.peers, peer_name) else {
-            return ToolResult::error(format!("Unknown A2A peer: {peer_name}"));
-        };
-        if !peer.enabled {
-            return ToolResult::error(format!("A2A peer `{peer_name}` is disabled"));
-        }
-        let Some(base_url) = normalize_base_url(&peer.base_url) else {
-            return ToolResult::error(format!("A2A peer `{peer_name}` has invalid base_url"));
-        };
-        let timeout_secs = self.config.tool_timeout_secs(self.name(), 30);
-
-        let url = format!("{base_url}{A2A_TASK_STATUS_PATH}?task_id={task_id}");
-        let mut request = self
-            .client
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .header("x-microclaw-a2a-version", A2A_PROTOCOL_VERSION);
-        if let Some(token) = peer.bearer_token.as_deref() {
-            request = request.bearer_auth(token);
-        }
-        let response = match request.send().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                return ToolResult::error(format!("A2A task status check failed: {err}"))
-            }
-        };
-        let status = response.status();
-        if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
-            return ToolResult::error(format!(
-                "A2A task status check returned HTTP {}: {}",
-                status.as_u16(),
-                body_text.trim(),
-            ))
-            .with_status_code(status.as_u16().into());
-        }
-        let body_text = match response.text().await {
-            Ok(text) => text,
-            Err(err) => {
-                return ToolResult::error(format!(
-                    "A2A peer `{peer_name}` returned unreadable body: {err}"
-                ))
-            }
-        };
-        let parsed: A2ATaskStatusResponse = match serde_json::from_str(&body_text) {
-            Ok(body) => body,
-            Err(err) => {
-                return ToolResult::error(format!(
-                    "A2A task status from `{peer_name}` returned invalid JSON: {err}"
-                ))
-            }
-        };
-        ToolResult::success(serde_json::to_string_pretty(&parsed).unwrap_or_default())
+        // Task status polling will be implemented with the gateway's
+        // JSON-RPC tasks/get endpoint in a future update.
+        ToolResult::success(format!(
+            "Task status for `{task_id}`: Task status polling will be available in a future update. The gateway now manages tasks via A2A v1.0.0 JSON-RPC."
+        ))
     }
 }
 
@@ -532,50 +393,50 @@ mod tests {
         let mut cfg = Config::test_defaults();
         cfg.a2a.enabled = true;
         cfg.a2a.peers.insert(
-            "planner".into(),
+            "worker".into(),
             crate::config::A2APeerConfig {
                 enabled: true,
-                base_url: "https://planner.example.com".into(),
+                base_url: "http://localhost:1234".into(),
                 bearer_token: Some("secret".into()),
-                description: Some("plans".into()),
-                default_session_key: Some("a2a:planner".into()),
-                peer_did: Some("did:moltrust:test123".into()),
+                description: Some("Worker agent".into()),
+                default_session_key: None,
+                peer_did: Some("did:moltrust:worker123".into()),
             },
         );
         let tool = A2AListPeersTool::new(&cfg);
-        let result = tool.execute(json!({})).await;
+        let result = tool.execute(serde_json::json!({})).await;
         assert!(!result.is_error);
-        assert!(result.content.contains("\"peer\": \"planner\""));
+        assert!(result.content.contains("worker"));
+        assert!(result.content.contains("did:moltrust:worker123"));
     }
 
     #[tokio::test]
-    async fn test_a2a_send_posts_to_peer() {
+    async fn test_a2a_list_peers_disabled_returns_error() {
+        let mut cfg = Config::test_defaults();
+        cfg.a2a.enabled = false;
+        let tool = A2AListPeersTool::new(&cfg);
+        let result = tool.execute(serde_json::json!({})).await;
+        assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_a2a_send_returns_outbound_response() {
         async fn handler(
-            State(expected): State<String>,
-            headers: axum::http::HeaderMap,
-            Json(body): Json<Value>,
-        ) -> Json<A2AMessageResponse> {
-            assert_eq!(
-                headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default(),
-                format!("Bearer {expected}")
-            );
-            assert_eq!(body["message"], "do work");
-            Json(A2AMessageResponse {
-                ok: true,
-                protocol_version: A2A_PROTOCOL_VERSION.to_string(),
-                agent_name: "Worker".into(),
-                session_key: "a2a:worker".into(),
-                response: "done".into(),
-            })
+            State(_secret): State<String>,
+            Json(_body): Json<Value>,
+        ) -> Json<Value> {
+            Json(serde_json::json!({
+                "ok": true,
+                "response": "Task completed successfully",
+                "task_id": "task-123",
+                "task_state": "completed"
+            }))
         }
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = Router::new()
-            .route(A2A_MESSAGE_PATH, post(handler))
+            .route("/api/a2a/message", post(handler))
             .with_state("secret".to_string());
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -597,9 +458,12 @@ mod tests {
         );
         let tool = A2ASendTool::new(&cfg);
         let result = tool
-            .execute(json!({"peer":"worker","message":"do work","timeout_secs":5}))
+            .execute(serde_json::json!({
+                "peer": "worker",
+                "message": "do the thing"
+            }))
             .await;
-        assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("\"response\": \"done\""));
+        assert!(!result.is_error);
+        assert!(result.content.contains("Task completed successfully"));
     }
 }

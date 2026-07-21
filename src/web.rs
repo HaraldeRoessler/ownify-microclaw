@@ -2052,7 +2052,6 @@ fn build_router(web_state: WebState) -> Router {
         .route("/icon.png", get(icon_file))
         .route("/favicon.ico", get(favicon_file))
         .route("/api/health", get(api_health))
-        .route("/.well-known/agent.json", get(a2a::api_a2a_agent_card))
         .route("/api/auth/status", get(auth::api_auth_status))
         .route("/api/auth/password", post(auth::api_auth_set_password))
         .route("/api/auth/login", post(auth::api_auth_login))
@@ -2090,11 +2089,6 @@ fn build_router(web_state: WebState) -> Router {
         )
         .route("/api/send", post(api_send))
         .route("/api/chat", post(api_send))
-        .route("/api/a2a/agent-card", get(a2a::api_a2a_agent_card))
-        .route("/api/a2a/message", post(a2a::api_a2a_message))
-        .route("/api/a2a/invoke_tool", post(a2a::api_a2a_invoke_tool))
-        .route("/api/a2a/task", post(a2a::api_a2a_task_create))
-        .route("/api/a2a/task/status", get(a2a::api_a2a_task_status))
         .route("/api/hooks/agent", post(api_hook_agent))
         .route("/api/hooks/wake", post(api_hook_wake))
         .route("/api/send_stream", post(stream::api_send_stream))
@@ -4413,96 +4407,9 @@ commands:
         assert!(!blocked);
     }
 
-    #[tokio::test]
-    async fn test_a2a_agent_card_route_returns_configured_metadata() {
-        let mut cfg = test_config_template();
-        cfg.a2a.enabled = true;
-        cfg.a2a.agent_name = Some("Planner".into());
-        cfg.a2a.agent_description = Some("Plans work".into());
-        cfg.a2a.public_base_url = Some("https://microclaw.example.com".into());
-        let app = build_router(test_web_state_from_app_state(
-            test_state_with_config(Box::new(DummyLlm), cfg),
-            WebLimits::default(),
-        ));
-
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/a2a/agent-card")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            v.get("agent_name").and_then(|x| x.as_str()),
-            Some("Planner")
-        );
-        assert_eq!(
-            v.pointer("/endpoints/message").and_then(|x| x.as_str()),
-            Some("https://microclaw.example.com/api/a2a/message")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_a2a_message_rejects_invalid_token() {
-        let mut cfg = test_config_template();
-        cfg.a2a.enabled = true;
-        cfg.a2a.shared_tokens = vec!["shared-secret".into()];
-        let app = build_router(test_web_state_from_app_state(
-            test_state_with_config(Box::new(DummyLlm), cfg),
-            WebLimits::default(),
-        ));
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/a2a/message")
-            .header("content-type", "application/json")
-            .header("authorization", "Bearer wrong")
-            .body(Body::from(r#"{"message":"hi","sourceAgent":"worker"}"#))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn test_a2a_message_round_trip_works() {
-        let mut cfg = test_config_template();
-        cfg.a2a.enabled = true;
-        cfg.a2a.agent_name = Some("Planner".into());
-        cfg.a2a.shared_tokens = vec!["shared-secret".into()];
-        let web_state = test_web_state_from_app_state(
-            test_state_with_config(Box::new(DummyLlm), cfg),
-            WebLimits::default(),
-        );
-        let app = build_router(web_state.clone());
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/a2a/message")
-            .header("content-type", "application/json")
-            .header("authorization", "Bearer shared-secret")
-            .body(Body::from(
-                r#"{"message":"hi","sourceAgent":"worker","sourceUrl":"https://worker.example.com"}"#,
-            ))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            v.get("response").and_then(|x| x.as_str()),
-            Some("hello from llm")
-        );
-        assert_eq!(
-            v.get("session_key").and_then(|x| x.as_str()),
-            Some("a2a:worker")
-        );
-    }
+    // A2A web route tests removed — A2A protocol is now handled by the
+    // gateway, not microclaw's web API. The gateway implements A2A v1.0.0
+    // with JSON-RPC 2.0, Agent Card, and Task Store.
 
     #[tokio::test]
     async fn test_ws_connect_and_chat_send_emit_chat_events() {
