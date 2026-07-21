@@ -2876,9 +2876,16 @@ pub(crate) fn message_to_text(msg: &Message) -> String {
                         } else {
                             "[tool_result]: "
                         };
-                        // Truncate long tool results for summary (char-boundary safe)
-                        let truncated = if content.len() > 200 {
-                            let mut end = 200;
+                        // Truncate long tool results for summary (char-boundary safe).
+                        // Higher limit (2000) preserves A2A peer responses, multi-step
+                        // tool outputs, and structured data that the agent needs to act
+                        // on after compaction. The old 200-char limit silently dropped
+                        // the actionable part of A2A responses ("Klaus hat geantwortet!
+                        // Er bittet um einen Termin mo..."), causing agents to lose
+                        // peer replies mid-conversation.
+                        const TOOL_RESULT_SUMMARY_MAX_CHARS: usize = 2000;
+                        let truncated = if content.len() > TOOL_RESULT_SUMMARY_MAX_CHARS {
+                            let mut end = TOOL_RESULT_SUMMARY_MAX_CHARS;
                             while !content.is_char_boundary(end) {
                                 end -= 1;
                             }
