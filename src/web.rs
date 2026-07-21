@@ -61,7 +61,13 @@ impl ChannelAdapter for WebAdapter {
     }
 
     fn allows_cross_chat(&self) -> bool {
-        false
+        // Allow web chats (including A2A inbound) to send messages to
+        // other chats (e.g. Matrix). Access control is enforced by
+        // control_chat_ids in the config and authorize_chat_access()
+        // in the tool runtime. The previous hard-coded false blocked
+        // A2A agents from forwarding peer requests to the user's
+        // Matrix chat.
+        true
     }
 
     async fn send_text(&self, _external_chat_id: &str, _text: &str) -> Result<(), String> {
