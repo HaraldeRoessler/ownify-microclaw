@@ -2089,6 +2089,7 @@ fn build_router(web_state: WebState) -> Router {
         )
         .route("/api/send", post(api_send))
         .route("/api/chat", post(api_send))
+        .route("/api/a2a/message", post(a2a::api_a2a_message))
         .route("/api/hooks/agent", post(api_hook_agent))
         .route("/api/hooks/wake", post(api_hook_wake))
         .route("/api/send_stream", post(stream::api_send_stream))

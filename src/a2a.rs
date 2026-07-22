@@ -150,6 +150,15 @@ pub fn effective_base_url(config: &Config) -> Option<String> {
     config.a2a.public_base_url.clone()
 }
 
+pub fn default_session_key_for_source(source_agent: Option<&str>) -> String {
+    source_agent
+        .and_then(normalize_peer_name)
+        .map(|v| format!("a2a:{v}"))
+        .unwrap_or_else(|| "a2a:remote".to_string())
+}
+
 pub fn sanitize_for_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
+    s.chars()
+        .filter(|&c| c >= '\u{0020}' || c == '\t' || c == '\n' || c == '\r')
+        .collect()
 }
